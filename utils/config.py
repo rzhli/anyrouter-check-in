@@ -23,6 +23,14 @@ class ProviderConfig:
 	waf_cookie_names: List[str] | None = None
 	use_proxy: bool = False
 	persist_profile: bool = False
+	# 签到流程类型：
+	# 'legacy'    - 老版 new-api / one-api：浏览器登录拿 session cookie + new-api-user 头
+	# 'newapi_v2' - 新版 new-api（v1.0.0-rc 起）：Authorization: Bearer 访问令牌 + Turnstile
+	flow: Literal['legacy', 'newapi_v2'] = 'legacy'
+	# newapi_v2 专用：签到状态查询接口（GET，返回 checked_in_today）
+	checkin_status_path: str | None = None
+	# 额度换算单位：quota / quota_per_unit = 美元金额
+	quota_per_unit: int = 500000
 
 	def __post_init__(self):
 		required_waf_cookies = set()
@@ -61,6 +69,9 @@ class ProviderConfig:
 			waf_cookie_names=data.get('waf_cookie_names', defaults.waf_cookie_names if defaults else None),
 			use_proxy=data.get('use_proxy', default_use_proxy),
 			persist_profile=data.get('persist_profile', default_persist_profile),
+			flow=data.get('flow', defaults.flow if defaults else 'legacy'),
+			checkin_status_path=data.get('checkin_status_path', defaults.checkin_status_path if defaults else None),
+			quota_per_unit=data.get('quota_per_unit', defaults.quota_per_unit if defaults else 500000),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -70,6 +81,10 @@ class ProviderConfig:
 	def needs_manual_check_in(self) -> bool:
 		"""判断是否需要手动调用签到接口"""
 		return self.sign_in_path is not None
+
+	def uses_access_token(self) -> bool:
+		"""判断是否使用访问令牌（Bearer）鉴权，而非 session cookie"""
+		return self.flow == 'newapi_v2'
 
 
 @dataclass
@@ -105,6 +120,30 @@ class AppConfig:
 				waf_cookie_names=['acw_tc'],
 				use_proxy=True,
 				persist_profile=False,
+			),
+			'gorouter': ProviderConfig(
+				name='gorouter',
+				domain='https://gorouter.app',
+				login_path='/sign-in',
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/self',
+				bypass_method=None,
+				use_proxy=False,
+				persist_profile=False,
+				flow='newapi_v2',
+				checkin_status_path='/api/user/checkin',
+			),
+			'justwoker': ProviderConfig(
+				name='justwoker',
+				domain='https://api.justwoker.icu',
+				login_path='/sign-in',
+				sign_in_path='/api/user/checkin',
+				user_info_path='/api/user/self',
+				bypass_method=None,
+				use_proxy=False,
+				persist_profile=False,
+				flow='newapi_v2',
+				checkin_status_path='/api/user/checkin',
 			),
 		}
 
@@ -155,6 +194,7 @@ class AccountConfig:
 	name: str | None = None
 	email: str | None = None
 	password: str | None = None
+	access_token: str | None = None
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
@@ -169,11 +209,16 @@ class AccountConfig:
 			name=name if name else None,
 			email=data.get('email'),
 			password=data.get('password'),
+			access_token=data.get('access_token'),
 		)
 
 	def has_login_credentials(self) -> bool:
 		"""是否配置了邮箱密码登录"""
 		return bool(self.email and self.password)
+
+	def has_access_token(self) -> bool:
+		"""是否配置了访问令牌（newapi_v2 流程使用）"""
+		return bool(self.access_token and self.access_token.strip())
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
@@ -205,20 +250,22 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				print(f'ERROR: Account {i + 1} configuration format is incorrect')
 				return None
 
-			if 'api_user' not in account_dict:
-				has_login = account_dict.get('email') and account_dict.get('password')
-				if not has_login:
-					print(
-						f'ERROR: Account {i + 1} missing required field (api_user) - only email+password login can omit it'
-					)
-					return None
-
+			has_access_token = bool(account_dict.get('access_token'))
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
 
-			if not has_cookies and not has_login:
-				print(f'ERROR: Account {i + 1} must have either cookies or email+password')
-				return None
+			# newapi_v2 类站点用 access_token 鉴权，不需要 api_user / cookies / 邮箱密码
+			if not has_access_token:
+				if 'api_user' not in account_dict and not has_login:
+					print(
+						f'ERROR: Account {i + 1} missing required field (api_user) - '
+						'only email+password login or access_token can omit it'
+					)
+					return None
+
+				if not has_cookies and not has_login:
+					print(f'ERROR: Account {i + 1} must have either cookies, email+password, or access_token')
+					return None
 
 			if 'name' in account_dict and not account_dict['name']:
 				print(f'ERROR: Account {i + 1} name field cannot be empty')

@@ -7,7 +7,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router 与 Agent Router，其它可根据文档进行摸索配置。
+多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router、Agent Router、GoRouter、JustDoWork，其它可根据文档进行摸索配置。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
@@ -17,7 +17,7 @@
 
 ## 功能特性
 
-- ✅ 多平台（兼容 NewAPI 与 OneAPI）
+- ✅ 多平台（兼容 NewAPI 与 OneAPI，含新版 NewAPI 的 Bearer + Turnstile 流程）
 - ✅ 单个/多账号自动签到
 - ✅ 多种机器人通知（可选）
 - ✅ 绕过 WAF 限制
@@ -74,6 +74,11 @@
     "provider": "agentrouter",
     "email": "account2@example.com",
     "password": "account2_password"
+  },
+  {
+    "name": "GoRouter",
+    "provider": "gorouter",
+    "access_token": "你的系统访问令牌"
   }
 ]
 ```
@@ -83,6 +88,7 @@
 - `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
 - `cookies`：兼容旧版的 session cookies 登录方式
 - `api_user`：session cookies 登录时用于请求头的 new-api-user 参数；邮箱密码登录可省略
+- `access_token`：新版 NewAPI 站点（`gorouter`、`justwoker`）专用的系统访问令牌，配置后无需 `cookies` / `api_user` / 邮箱密码
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
 
@@ -90,7 +96,43 @@
 
 - 如果未提供 `provider` 字段，默认使用 `anyrouter`（向后兼容）
 - 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称
-- `anyrouter` 与 `agentrouter` 配置已内置，无需填写
+- `anyrouter`、`agentrouter`、`gorouter`、`justwoker` 配置已内置，无需填写
+
+### 4.1 新版 NewAPI 站点（GoRouter / JustDoWork）
+
+新版 NewAPI（`v1.0.0-rc` 起）改用 `Authorization: Bearer` 鉴权，`session` cookie 与 `new-api-user` 请求头都已失效，且签到接口带 Cloudflare Turnstile 校验。这类站点走 `flow: "newapi_v2"` 流程，只需要一个长期有效的系统访问令牌。
+
+获取令牌：登录站点 → 右上角头像 → **个人设置** → **安全** → **系统访问令牌（Access Token）** → 生成并复制。
+
+配置示例：
+
+```json
+[
+  {
+    "name": "GoRouter",
+    "provider": "gorouter",
+    "access_token": "你在 GoRouter 生成的令牌"
+  },
+  {
+    "name": "JustDoWork",
+    "provider": "justwoker",
+    "access_token": "你在 JustDoWork 生成的令牌"
+  }
+]
+```
+
+签到流程：
+
+1. 用令牌请求 `/api/user/self` 读取签到前余额
+2. 请求 `/api/user/checkin?month=YYYY-MM` 判断今日是否已签到；已签到则直接结束，**不启动浏览器**
+3. 未签到时启动 CloakBrowser 打开 `/sign-in`，从 Turnstile widget 取回 token
+4. 带 token 请求 `POST /api/user/checkin?turnstile=<token>` 完成签到，再读一次余额算差额
+
+注意事项：
+
+- 必须使用 CloakBrowser 自带的 Chromium。Playwright 自带的 Chromium 中 `navigator.webdriver` 恒为 `true`、UA 含 `HeadlessChrome`，Turnstile 不会签发 token（实测无法通过）
+- 这类站点无需 xvfb，`CHECKIN_HEADLESS=true` 即可
+- 令牌等价于账号长期凭证，只放进 GitHub Secrets，不要提交到仓库或明文分享；泄露后到同一页面重新生成即可失效旧令牌
 
 如果使用 session cookies 登录，接下来获取 cookies 与 api_user 的值。
 
@@ -180,9 +222,34 @@
 ]
 ```
 
+### 新版 NewAPI 站点配置（access_token）
+
+内置的 `gorouter`、`justwoker` 使用新版 NewAPI 流程，与旧站点可以混编在同一份配置里：
+
+```json
+[
+  {
+    "name": "AnyRouter 主账号",
+    "provider": "anyrouter",
+    "email": "account1@example.com",
+    "password": "account1_password"
+  },
+  {
+    "name": "GoRouter",
+    "provider": "gorouter",
+    "access_token": "gorouter_令牌"
+  },
+  {
+    "name": "JustDoWork",
+    "provider": "justwoker",
+    "access_token": "justwoker_令牌"
+  }
+]
+```
+
 ## 自定义 Provider 配置（可选）
 
-默认情况下，`anyrouter`、`agentrouter` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
+默认情况下，`anyrouter`、`agentrouter`、`gorouter`、`justwoker` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
 
 ### 基础配置（仅域名）
 
@@ -219,7 +286,26 @@
 - 不设置或设置为 `null`：直接使用用户提供的 cookies 进行请求（适合无 WAF 保护的网站）
 - 设置为 `"waf_cookies"`：使用 CloakBrowser 打开浏览器获取 WAF cookies 后再进行请求（适合有 WAF 保护的网站）
 
-> 注：`anyrouter` 和 `agentrouter` 已内置默认配置，无需在 `PROVIDERS` 中配置
+### 新版 NewAPI 站点（flow: newapi_v2）
+
+如果目标站点是新版 NewAPI（登录页在 `/sign-in`、签到接口是 `/api/user/checkin`），改用 `flow` 字段：
+
+```json
+{
+  "mysite": {
+    "domain": "https://my.example.com",
+    "flow": "newapi_v2",
+    "login_path": "/sign-in",
+    "sign_in_path": "/api/user/checkin",
+    "checkin_status_path": "/api/user/checkin",
+    "quota_per_unit": 500000
+  }
+}
+```
+
+可以访问 `https://站点域名/api/status` 确认是否属于这类站点：返回体里包含 `checkin_enabled`、`turnstile_check`、`quota_per_unit` 则是。
+
+> 注：`anyrouter`、`agentrouter`、`gorouter`、`justwoker` 已内置默认配置，无需在 `PROVIDERS` 中配置
 
 ### 在 GitHub Actions 中配置
 
@@ -239,6 +325,9 @@
   - `"waf_cookies"`：使用 CloakBrowser 打开浏览器获取 WAF cookies 后再执行签到
   - 不设置或 `null`：直接使用用户 cookies 执行签到（适合无 WAF 保护的网站）
 - `waf_cookie_names` (可选)：绕过 WAF 所需 cookie 的名称列表，`bypass_method` 为 `waf_cookies` 时必须设置
+- `flow` (可选)：签到流程类型，`"legacy"`（默认，session cookie + `new-api-user`）或 `"newapi_v2"`（Bearer 访问令牌 + Turnstile）
+- `checkin_status_path` (可选)：`newapi_v2` 专用，签到状态查询接口，设置后已签到就不再启动浏览器
+- `quota_per_unit` (可选)：额度换算单位，默认 `500000`
 
 **配置示例**（完整）：
 
@@ -264,10 +353,14 @@
   - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
   - `sign_in_path: null`（查询用户信息时自动签到）
   - `use_proxy: true`
+- `gorouter`、`justwoker`：
+  - `flow: "newapi_v2"`（Bearer 访问令牌 + Turnstile，需要账号配置 `access_token`）
+  - `login_path: "/sign-in"`、`sign_in_path: "/api/user/checkin"`
+  - `bypass_method: null`（不需要 WAF cookies）
 
 **重要提示**：
 
-- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter` 和 `agentrouter`
+- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`agentrouter`、`gorouter`、`justwoker`
 - 自定义的 provider 配置会覆盖同名的默认配置
 
 ## 代理配置（可选）
