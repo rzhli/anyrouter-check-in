@@ -46,6 +46,8 @@ SUBMIT_SELECTORS = (
 SESSION_COOKIE_NAME = 'session'
 USER_SELF_API_SUFFIX = '/api/user/self'
 CONSOLE_PATH = '/console'
+TURNSTILE_RESPONSE_SELECTOR = 'input[name="cf-turnstile-response"]'
+TURNSTILE_TOKEN_TIMEOUT_MS = 60_000
 DEFAULT_SCREENSHOT_DIR = 'checkin_screenshots'
 DEFAULT_TIMEOUT_MS = 60_000
 _pending_notify_screenshots: list[Path] = []
@@ -478,6 +480,68 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 
 async def wait_for_waf_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:
 	await wait_for_site_ready(page, timeout_ms)
+
+
+_READ_TURNSTILE_TOKEN_JS = f"""() => {{
+	const inputs = [...document.querySelectorAll('{TURNSTILE_RESPONSE_SELECTOR}')];
+	for (const input of inputs) {{
+		if (input.value) return input.value;
+	}}
+	return null;
+}}"""
+
+
+async def read_turnstile_token(page: Page) -> str | None:
+	"""读取页面上已签发的 Turnstile token（未就绪时返回 None）。"""
+	try:
+		token = await page.evaluate(_READ_TURNSTILE_TOKEN_JS)
+	except Exception as exc:  # nosec B110
+		debug_print(f'[INFO] Failed to read Turnstile token: {exc}')
+		return None
+	return token if isinstance(token, str) and token else None
+
+
+async def wait_for_turnstile_token(page: Page, timeout_ms: int = TURNSTILE_TOKEN_TIMEOUT_MS) -> str | None:
+	"""等待 Cloudflare Turnstile widget 签发 token。
+
+	new-api 的 /sign-in 页在开启 turnstile_check 时会自动渲染 widget，
+	token 写入隐藏的 input[name="cf-turnstile-response"]。
+	"""
+	deadline = time.monotonic() + timeout_ms / 1000
+	while time.monotonic() < deadline:
+		token = await read_turnstile_token(page)
+		if token:
+			return token
+		await asyncio.sleep(0.5)
+	return await read_turnstile_token(page)
+
+
+async def fetch_turnstile_token(
+	page: Page,
+	login_url: str,
+	timeout_ms: int,
+	*,
+	provider: str = '',
+	account_name: str = '',
+) -> str | None:
+	"""打开登录页并取回一个 Turnstile token。"""
+	nav_timeout = min(timeout_ms, 60_000)
+	try:
+		await page.goto(login_url, wait_until='load', timeout=nav_timeout)
+	except Exception as exc:
+		print(f'[WARN] Failed to open {login_url} for Turnstile: {exc}')
+		return None
+
+	await _wait_for_optional_load_state(page, 'networkidle', min(timeout_ms, 20_000))
+	token = await wait_for_turnstile_token(page, min(timeout_ms, TURNSTILE_TOKEN_TIMEOUT_MS))
+	if token:
+		debug_print(f'[INFO] Turnstile token acquired (length={len(token)})')
+		return token
+
+	print('[WARN] Turnstile widget did not issue a token in time')
+	if provider and account_name:
+		await save_login_screenshot(page, provider, account_name, 'turnstile-timeout')
+	return None
 
 
 async def _first_visible_locator(page: Page, selectors: tuple[str, ...]) -> Locator | None:
