@@ -31,6 +31,17 @@ class ProviderConfig:
 	checkin_status_path: str | None = None
 	# 额度换算单位：quota / quota_per_unit = 美元金额
 	quota_per_unit: int = 500000
+	# 浏览器点击签到：newapi_v2 站点若被 Cloudflare 拦截（httpx 无法直接访问 API），
+	# 改为在真实浏览器里打开签到页、点击签到按钮，让浏览器自行通过 CF + Turnstile。
+	browser_click_check_in: bool = False
+	# 浏览器点击签到时打开的页面（含签到按钮），默认 /profile
+	checkin_page_path: str = '/profile'
+	# 浏览器点击签到按钮的 CSS 选择器（可选，优先于文本匹配）
+	checkin_button_selector: str | None = None
+	# 浏览器点击签到按钮的可见文本（可选，可精确匹配）
+	checkin_button_text: str | None = None
+	# 浏览器点击签到时，把访问令牌写入 SPA 的 localStorage 键名（默认 token）
+	token_storage_key: str = 'token'
 
 	def __post_init__(self):
 		required_waf_cookies = set()
@@ -72,6 +83,15 @@ class ProviderConfig:
 			flow=data.get('flow', defaults.flow if defaults else 'legacy'),
 			checkin_status_path=data.get('checkin_status_path', defaults.checkin_status_path if defaults else None),
 			quota_per_unit=data.get('quota_per_unit', defaults.quota_per_unit if defaults else 500000),
+			browser_click_check_in=data.get(
+				'browser_click_check_in', defaults.browser_click_check_in if defaults else False
+			),
+			checkin_page_path=data.get('checkin_page_path', defaults.checkin_page_path if defaults else '/profile'),
+			checkin_button_selector=data.get(
+				'checkin_button_selector', defaults.checkin_button_selector if defaults else None
+			),
+			checkin_button_text=data.get('checkin_button_text', defaults.checkin_button_text if defaults else None),
+			token_storage_key=data.get('token_storage_key', defaults.token_storage_key if defaults else 'token'),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -85,6 +105,10 @@ class ProviderConfig:
 	def uses_access_token(self) -> bool:
 		"""判断是否使用访问令牌（Bearer）鉴权，而非 session cookie"""
 		return self.flow == 'newapi_v2'
+
+	def needs_browser_click_check_in(self) -> bool:
+		"""判断是否需要浏览器点击签到（用于被 Cloudflare 拦截的 newapi_v2 站点）"""
+		return self.browser_click_check_in
 
 
 @dataclass
@@ -129,9 +153,14 @@ class AppConfig:
 				user_info_path='/api/user/self',
 				bypass_method=None,
 				use_proxy=False,
-				persist_profile=False,
+				# 浏览器点击签到需要复用登录态 / CF 通行 cookie，使用持久化浏览器 profile
+				persist_profile=True,
 				flow='newapi_v2',
 				checkin_status_path='/api/user/checkin',
+				# gorouter.app 整站被 Cloudflare 拦截，httpx 无法直连 API；
+				# 需在真实浏览器里打开 /profile 点击签到按钮，由浏览器通过 CF + Turnstile。
+				browser_click_check_in=True,
+				checkin_page_path='/profile',
 			),
 			'justwoker': ProviderConfig(
 				name='justwoker',
