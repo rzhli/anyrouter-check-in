@@ -121,17 +121,28 @@
 ]
 ```
 
-签到流程：
+签到流程（HTTP 直连，适用 `justwoker` 等未被 Cloudflare 拦截的站点）：
 
 1. 用令牌请求 `/api/user/self` 读取签到前余额
 2. 请求 `/api/user/checkin?month=YYYY-MM` 判断今日是否已签到；已签到则直接结束，**不启动浏览器**
 3. 未签到时启动 CloakBrowser 打开 `/sign-in`，从 Turnstile widget 取回 token
 4. 带 token 请求 `POST /api/user/checkin?turnstile=<token>` 完成签到，再读一次余额算差额
 
+**浏览器点击签到（适用 `gorouter` 等整站被 Cloudflare 拦截的站点）**：
+
+`gorouter.app` 整站都套了 Cloudflare，上面的 HTTP 直连流程会被 `Sorry, you have been blocked` 拦截。这类站点改用浏览器点击签到：
+
+1. 启动 CloakBrowser 打开站点，通过 Cloudflare 挑战（拿到通行 cookie）
+2. 把访问令牌写入前端 `localStorage`，让 SPA 视为已登录
+3. 打开 `/profile`，读取签到前余额并判断今日是否已签到
+4. 点击“签到”按钮，由浏览器自动通过 Turnstile 并提交 `POST /api/user/checkin`
+5. 读取签到后余额，计算差额
+
 注意事项：
 
 - 必须使用 CloakBrowser 自带的 Chromium。Playwright 自带的 Chromium 中 `navigator.webdriver` 恒为 `true`、UA 含 `HeadlessChrome`，Turnstile 不会签发 token（实测无法通过）
-- 这类站点无需 xvfb，`CHECKIN_HEADLESS=true` 即可
+- 浏览器点击签到通过持久化浏览器 profile 复用 Cloudflare 通行 cookie，`CHECKIN_BROWSER_PROFILE_DIR` 可自定义存放目录
+- 两类站点无需 xvfb，`CHECKIN_HEADLESS=true` 即可
 - 令牌等价于账号长期凭证，只放进 GitHub Secrets，不要提交到仓库或明文分享；泄露后到同一页面重新生成即可失效旧令牌
 
 如果使用 session cookies 登录，接下来获取 cookies 与 api_user 的值。
@@ -303,6 +314,23 @@
 }
 ```
 
+如果这类站点整站被 Cloudflare 拦截（`curl https://站点域名/api/status` 返回 `Sorry, you have been blocked`），HTTP 直连会失效，需开启浏览器点击签到，补上 `browser_click_check_in` 字段：
+
+```json
+{
+  "mysite": {
+    "domain": "https://my.example.com",
+    "flow": "newapi_v2",
+    "login_path": "/sign-in",
+    "sign_in_path": "/api/user/checkin",
+    "checkin_status_path": "/api/user/checkin",
+    "browser_click_check_in": true,
+    "checkin_page_path": "/profile",
+    "token_storage_key": "token"
+  }
+}
+```
+
 可以访问 `https://站点域名/api/status` 确认是否属于这类站点：返回体里包含 `checkin_enabled`、`turnstile_check`、`quota_per_unit` 则是。
 
 > 注：`anyrouter`、`agentrouter`、`gorouter`、`justwoker` 已内置默认配置，无需在 `PROVIDERS` 中配置
@@ -328,6 +356,11 @@
 - `flow` (可选)：签到流程类型，`"legacy"`（默认，session cookie + `new-api-user`）或 `"newapi_v2"`（Bearer 访问令牌 + Turnstile）
 - `checkin_status_path` (可选)：`newapi_v2` 专用，签到状态查询接口，设置后已签到就不再启动浏览器
 - `quota_per_unit` (可选)：额度换算单位，默认 `500000`
+- `browser_click_check_in` (可选)：`newapi_v2` 专用，站点被 Cloudflare 拦截时设为 `true`，改用浏览器打开签到页并点击签到按钮完成签到
+- `checkin_page_path` (可选)：浏览器点击签到时打开的页面，默认 `/profile`
+- `checkin_button_selector` (可选)：签到按钮的 CSS 选择器（优先于文本匹配）
+- `checkin_button_text` (可选)：签到按钮的可见文本（可用于精确匹配）
+- `token_storage_key` (可选)：把访问令牌写入 SPA 的 `localStorage` 键名，默认 `token`
 
 **配置示例**（完整）：
 
@@ -357,6 +390,7 @@
   - `flow: "newapi_v2"`（Bearer 访问令牌 + Turnstile，需要账号配置 `access_token`）
   - `login_path: "/sign-in"`、`sign_in_path: "/api/user/checkin"`
   - `bypass_method: null`（不需要 WAF cookies）
+  - `gorouter` 额外开启 `browser_click_check_in: true`（整站被 Cloudflare 拦截，需浏览器点击签到）；`justwoker` 保持 HTTP 直连流程
 
 **重要提示**：
 

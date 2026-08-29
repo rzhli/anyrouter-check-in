@@ -45,8 +45,25 @@ SUBMIT_SELECTORS = (
 )
 SESSION_COOKIE_NAME = 'session'
 USER_SELF_API_SUFFIX = '/api/user/self'
+CHECKIN_API_SUFFIX = '/api/user/checkin'
 CONSOLE_PATH = '/console'
 TURNSTILE_RESPONSE_SELECTOR = 'input[name="cf-turnstile-response"]'
+# 浏览器点击签到：签到按钮的可见文本匹配（用于 newapi_v2 站点被 Cloudflare 拦截时）
+CHECK_IN_BUTTON_TEXT_PATTERNS = (
+	re.compile(r'签到'),
+	re.compile(r'每日签到'),
+	re.compile(r'打卡'),
+	re.compile(r'check\s*in', re.I),
+	re.compile(r'sign\s*in', re.I),
+)
+# 已签到的提示文本（用于判断签到按钮是否已失效 / 已打卡）
+CHECKED_IN_TEXT_PATTERNS = (
+	re.compile(r'已签到'),
+	re.compile(r'已打卡'),
+	re.compile(r'checked\s*in', re.I),
+	re.compile(r'already\s*signed', re.I),
+	re.compile(r'signed\s*in\s*today', re.I),
+)
 TURNSTILE_TOKEN_TIMEOUT_MS = 60_000
 DEFAULT_SCREENSHOT_DIR = 'checkin_screenshots'
 DEFAULT_TIMEOUT_MS = 60_000
@@ -841,3 +858,185 @@ async def login_with_email_form(
 	)
 	await fill_email_credentials(page, email, password, timeout_ms)
 	await submit_login_form(page, timeout_ms)
+
+
+async def navigate_and_wait(page: Page, url: str, timeout_ms: int) -> None:
+	"""导航到 URL 并等待站点就绪（通过 WAF / Cloudflare）。"""
+	nav_timeout = min(timeout_ms, 60_000)
+	await page.goto(url, wait_until='load', timeout=nav_timeout)
+	await wait_for_site_ready(page, timeout_ms)
+
+
+async def inject_access_token(page: Page, token: str, storage_key: str = 'token') -> None:
+	"""把访问令牌写入 SPA 的 localStorage，让 newapi_v2 前端认为已登录。
+
+	new-api 前端读取 localStorage[token] 作为 Authorization: Bearer 凭证，
+	浏览器在站点 origin 上设置后，/profile 等页面即可正常渲染并显示签到按钮。
+	"""
+	await page.evaluate(
+		"""(args) => { localStorage.setItem(args.key, args.value); }""",
+		{'key': storage_key, 'value': token},
+	)
+
+
+async def fetch_json_via_page(
+	page: Page,
+	url_path: str,
+	token: str,
+	method: str = 'GET',
+	params: dict | None = None,
+) -> dict | None:
+	"""在页面上下文内发起同源 fetch（带上 Bearer 令牌）。
+
+	浏览器已在站点 origin 上通过 Cloudflare（携带 cf_clearance 等 cookie），
+	页面内 fetch 天然携带浏览器指纹与 cookie，可绕过 CF 对 httpx 的拦截。
+	"""
+	script = """async (args) => {
+		try {
+			const url = new URL(args.path, location.origin);
+			if (args.params) {
+				for (const [k, v] of Object.entries(args.params)) url.searchParams.set(k, v);
+			}
+			const opts = {
+				method: args.method,
+				headers: { 'Authorization': 'Bearer ' + args.token },
+			};
+			if (args.method !== 'GET') opts.headers['Content-Type'] = 'application/json';
+			const resp = await fetch(url.toString(), opts);
+			let body = null;
+			try { body = await resp.json(); } catch (e) { body = null; }
+			if (body === null) return { success: false, error: 'invalid JSON, HTTP ' + resp.status };
+			return body;
+		} catch (e) {
+			return { success: false, error: String(e) };
+		}
+	}"""
+	try:
+		result = await page.evaluate(
+			script,
+			{'path': url_path, 'token': token, 'method': method, 'params': params or {}},
+		)
+		if isinstance(result, dict):
+			return result
+		return None
+	except Exception as exc:
+		debug_print(f'[INFO] Failed to fetch {url_path} via page: {exc}')
+		return None
+
+
+async def _find_check_in_locator(page: Page, *, selector: str | None = None, text: str | None = None) -> Locator | None:
+	"""返回一个可见的签到按钮 Locator；找不到返回 None。"""
+	if selector:
+		try:
+			locator = page.locator(selector).first
+			if await locator.is_visible():
+				return locator
+		except Exception:  # nosec B110
+			pass
+
+	patterns: list[re.Pattern] = []
+	if text:
+		patterns.append(re.compile(re.escape(text)))
+	patterns.extend(CHECK_IN_BUTTON_TEXT_PATTERNS)
+
+	for pattern in patterns:
+		try:
+			locator = page.get_by_role('button', name=pattern).first
+			if await locator.is_visible():
+				return locator
+		except Exception:  # nosec B112
+			continue
+	return None
+
+
+async def click_check_in_button(
+	page: Page,
+	*,
+	selector: str | None = None,
+	text: str | None = None,
+	timeout_ms: int = FORM_ACTION_TIMEOUT_MS,
+) -> bool:
+	"""找到并点击签到按钮。返回是否成功点击。"""
+	locator = await _find_check_in_locator(page, selector=selector, text=text)
+	if locator is None:
+		return False
+	try:
+		await locator.scroll_into_view_if_needed(timeout=timeout_ms)
+		await locator.click(timeout=timeout_ms)
+		return True
+	except Exception:
+		try:
+			await locator.click(force=True, timeout=timeout_ms)
+			return True
+		except Exception:  # nosec B112
+			return False
+
+
+async def detect_checked_in_button(page: Page) -> bool | None:
+	"""从页面文本 / 按钮禁用状态判断是否已签到。无法判断时返回 None。"""
+	for pattern in CHECKED_IN_TEXT_PATTERNS:
+		try:
+			locator = page.get_by_text(pattern).first
+			if await locator.is_visible():
+				return True
+		except Exception:  # nosec B112
+			continue
+
+	try:
+		btn = await _find_check_in_locator(page)
+		if btn is not None and await btn.is_disabled():
+			return True
+	except Exception:  # nosec B110
+		pass
+	return None
+
+
+class ResponseCollector:
+	"""收集 newapi_v2 签到相关响应（/api/user/self、/api/user/checkin）。"""
+
+	def __init__(self, page: Page) -> None:
+		self.page = page
+		self.user_self: list[dict] = []
+		self.checkin_get: list[dict] = []
+		self.checkin_post: list[dict] = []
+		self._handler = self._on_response
+		page.on('response', self._handler)
+
+	async def _on_response(self, response) -> None:
+		if response.status != 200:
+			return
+		try:
+			url = response.url
+			method = response.request.method
+		except Exception:  # nosec B110
+			return
+		if USER_SELF_API_SUFFIX in url and method == 'GET':
+			try:
+				self.user_self.append(await response.json())
+			except Exception:  # nosec B110
+				pass
+		elif CHECKIN_API_SUFFIX in url and method == 'GET':
+			try:
+				self.checkin_get.append(await response.json())
+			except Exception:  # nosec B110
+				pass
+		elif CHECKIN_API_SUFFIX in url and method == 'POST':
+			try:
+				self.checkin_post.append(await response.json())
+			except Exception:  # nosec B110
+				pass
+
+	def detach(self) -> None:
+		try:
+			self.page.remove_listener('response', self._handler)
+		except Exception:  # nosec B110
+			pass
+
+	async def wait_for_checkin_post(self, timeout_ms: int) -> dict | None:
+		"""等待 POST /api/user/checkin 响应；超时返回已捕获的最后一条（可能为 None）。"""
+		deadline = time.monotonic() + timeout_ms / 1000
+		while time.monotonic() < deadline:
+			if self.checkin_post:
+				return self.checkin_post[-1]
+			await asyncio.sleep(0.3)
+		return self.checkin_post[-1] if self.checkin_post else None

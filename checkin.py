@@ -21,12 +21,18 @@ from dotenv import load_dotenv
 
 from utils.browser import (
 	BrowserLoginResult,
+	ResponseCollector,
+	click_check_in_button,
+	detect_checked_in_button,
+	fetch_json_via_page,
 	fetch_turnstile_token,
 	has_session_cookie,
+	inject_access_token,
 	is_logged_in,
 	launch_login_context,
 	load_browser_login_settings,
 	login_with_email_form,
+	navigate_and_wait,
 	navigate_login_page,
 	prepare_browser_page,
 	save_login_screenshot,
@@ -235,24 +241,35 @@ async def login_with_credentials(
 		return None
 
 
+def parse_user_info_payload(payload, quota_per_unit: int = 500000) -> dict:
+	"""解析 /api/user/self 的 JSON payload 为统一的信息字典。"""
+	if not isinstance(payload, dict):
+		return {'success': False, 'error': 'Invalid response'}
+	if payload.get('success'):
+		user_data = payload.get('data', {}) or {}
+		unit = quota_per_unit or 500000
+		quota = round(user_data.get('quota', 0) / unit, 2)
+		used_quota = round(user_data.get('used_quota', 0) / unit, 2)
+		return {
+			'success': True,
+			'quota': quota,
+			'used_quota': used_quota,
+			'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
+		}
+	return {'success': False, 'error': payload.get('message') or payload.get('msg') or 'Unknown error'}
+
+
 def get_user_info(client, headers, user_info_url: str, quota_per_unit: int = 500000):
 	"""获取用户信息"""
 	try:
 		response = client.get(user_info_url, headers=headers, timeout=30)
 
 		if response.status_code == 200:
-			data = response.json()
-			if data.get('success'):
-				user_data = data.get('data', {})
-				unit = quota_per_unit or 500000
-				quota = round(user_data.get('quota', 0) / unit, 2)
-				used_quota = round(user_data.get('used_quota', 0) / unit, 2)
-				return {
-					'success': True,
-					'quota': quota,
-					'used_quota': used_quota,
-					'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
-				}
+			try:
+				payload = response.json()
+			except json.JSONDecodeError:
+				return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
+			return parse_user_info_payload(payload, quota_per_unit)
 		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
 	except Exception as e:
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
@@ -490,6 +507,168 @@ def is_checked_in_today(client, account_name: str, provider_config, headers: dic
 	return checked if isinstance(checked, bool) else None
 
 
+def _parse_checked_in_state(payload) -> bool | None:
+	"""从 /api/user/checkin?month= 响应中解析今日是否已签到。无法判断返回 None。"""
+	if not isinstance(payload, dict) or not payload.get('success'):
+		return None
+	data = payload.get('data')
+	if not isinstance(data, dict):
+		return None
+	stats = data.get('stats')
+	if not isinstance(stats, dict):
+		stats = {}
+	checked = stats.get('checked_in_today')
+	return checked if isinstance(checked, bool) else None
+
+
+def _interpret_browser_checkin(before: dict | None, after: dict | None, post_payload=None) -> bool:
+	"""结合拦截到的 POST /api/user/checkin 响应与余额差额，判断浏览器签到是否成功。"""
+	if isinstance(post_payload, dict):
+		message = post_payload.get('message') or post_payload.get('msg')
+		if post_payload.get('success'):
+			print('[SUCCESS] Check-in response reported success')
+			return True
+		if message and is_already_checked_in(message):
+			print('[SUCCESS] Check-in already completed (response)')
+			return True
+		if message:
+			print(f'[FAILED] Check-in failed - {message}')
+			return False
+
+	if before and after and before.get('success') and after.get('success'):
+		reward = (after['quota'] + after['used_quota']) - (before['quota'] + before['used_quota'])
+		if reward > 0:
+			print(f'[SUCCESS] Check-in reward detected: +${reward:.2f}')
+			return True
+		if reward == 0 and after['used_quota'] > before['used_quota']:
+			print('[INFO] No reward but usage increased (check-in likely already completed)')
+			return True
+		print(f'[FAILED] No check-in reward detected (delta=${reward:.2f})')
+		return False
+	return False
+
+
+async def check_in_account_v2_browser(
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
+) -> tuple[bool, dict | None, dict | None]:
+	"""newapi_v2 浏览器点击签到：用于整站被 Cloudflare 拦截、httpx 无法直连 API 的站点。
+
+	流程：
+	  1. 打开站点首页，通过 Cloudflare 挑战（拿到 cf_clearance）
+	  2. 把访问令牌写入 SPA 的 localStorage，让前端“已登录”
+	  3. 打开签到页（如 /profile），读取签到前余额
+	  4. 判断今日是否已签到；已签到则结束，不点击
+	  5. 点击签到按钮，由浏览器自动通过 Turnstile 并 POST /api/user/checkin
+	  6. 读取签到后余额，返回差额
+	"""
+	if not account.has_access_token():
+		print(
+			f'[FAILED] {account_name}: Provider "{account.provider}" requires an access_token '
+			'(在站点“个人设置 → 安全 → 系统访问令牌”生成)'
+		)
+		return False, None, None
+
+	assert account.access_token is not None
+	access_token = account.access_token.strip()
+	print(f'[AUTH] {account_name}: Using auth method -> access token (Bearer) via browser click')
+
+	settings = load_browser_login_settings(
+		account_name,
+		provider_config.name,
+		persist_profile=provider_config.persist_profile,
+	)
+	timeout_ms = settings.wait_timeout_ms
+
+	try:
+		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+	except Exception as e:
+		print(f'[FAILED] {account_name}: Browser launch failed: {e}')
+		return False, None, None
+
+	page = None
+	try:
+		page = await context.new_page()
+		await prepare_browser_page(page)
+
+		base_url = provider_config.domain.rstrip('/')
+		profile_url = f'{base_url}{provider_config.checkin_page_path}'
+
+		# 1. 打开站点首页，通过 Cloudflare
+		await navigate_and_wait(page, base_url, timeout_ms)
+
+		# 2. 注入访问令牌，让前端“已登录”
+		await inject_access_token(page, access_token, provider_config.token_storage_key)
+
+		# 3. 打开签到页，并挂载响应收集器
+		collector = ResponseCollector(page)
+		await navigate_and_wait(page, profile_url, timeout_ms)
+		await asyncio.sleep(2)
+
+		# 读取签到前余额（页面内 fetch，天然通过 Cloudflare）
+		before_payload = await fetch_json_via_page(page, provider_config.user_info_path, access_token)
+		before_info = parse_user_info_payload(before_payload, provider_config.quota_per_unit)
+		if before_info and before_info.get('success'):
+			print(before_info['display'])
+		else:
+			error = before_info.get('error', 'Unknown error') if before_info else 'Unknown error'
+			print(f'[FAILED] {account_name}: Access token rejected or user info unavailable - {error}')
+			await save_login_screenshot(page, provider_config.name, account_name, 'browser-token-rejected')
+			collector.detach()
+			return False, before_info, None
+
+		# 判断今日是否已签到
+		checked: bool | None = None
+		if provider_config.checkin_status_path:
+			month = datetime.now().strftime('%Y-%m')
+			status_payload = await fetch_json_via_page(
+				page, provider_config.checkin_status_path, access_token, 'GET', {'month': month}
+			)
+			checked = _parse_checked_in_state(status_payload)
+		if checked is None:
+			checked = await detect_checked_in_button(page)
+		if checked:
+			print(f'[SUCCESS] {account_name}: Already checked in today, skipping browser click')
+			collector.detach()
+			return True, before_info, before_info
+
+		# 点击签到按钮
+		clicked = await click_check_in_button(
+			page,
+			selector=provider_config.checkin_button_selector,
+			text=provider_config.checkin_button_text,
+			timeout_ms=min(timeout_ms, 30_000),
+		)
+		if not clicked:
+			print(f'[FAILED] {account_name}: Could not locate the check-in button')
+			await save_login_screenshot(page, provider_config.name, account_name, 'checkin-button-not-found')
+			collector.detach()
+			return False, before_info, before_info
+
+		print(f'[INFO] {account_name}: Check-in button clicked, waiting for result...')
+		post_payload = await collector.wait_for_checkin_post(timeout_ms)
+
+		# 读取签到后余额
+		await asyncio.sleep(1)
+		after_payload = await fetch_json_via_page(page, provider_config.user_info_path, access_token)
+		after_info = parse_user_info_payload(after_payload, provider_config.quota_per_unit)
+		if after_info and after_info.get('success'):
+			print(after_info['display'])
+
+		success = _interpret_browser_checkin(before_info, after_info, post_payload)
+		collector.detach()
+		return success, before_info, after_info
+
+	except Exception as e:
+		print(f'[FAILED] {account_name}: Error during browser check-in - {str(e)[:80]}')
+		if page is not None:
+			await save_login_screenshot(page, provider_config.name, account_name, 'browser-checkin-error')
+		return False, None, None
+	finally:
+		await context.close()
+
+
 async def check_in_account_v2(
 	account: AccountConfig,
 	account_name: str,
@@ -502,6 +681,10 @@ async def check_in_account_v2(
 			'(在站点“个人设置 → 安全 → 系统访问令牌”生成)'
 		)
 		return False, None, None
+
+	# 整站被 Cloudflare 拦截时，改用浏览器点击签到
+	if provider_config.needs_browser_click_check_in():
+		return await check_in_account_v2_browser(account, account_name, provider_config)
 
 	assert account.access_token is not None
 	access_token = account.access_token.strip()

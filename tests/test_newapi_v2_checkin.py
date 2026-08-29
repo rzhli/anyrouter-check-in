@@ -10,11 +10,14 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from checkin import (
+	_interpret_browser_checkin,
+	_parse_checked_in_state,
 	check_in_account_v2,
 	execute_check_in_v2,
 	get_user_info,
 	is_already_checked_in,
 	is_checked_in_today,
+	parse_user_info_payload,
 )
 from utils.config import AccountConfig, AppConfig
 
@@ -85,6 +88,11 @@ def test_builtin_newapi_v2_providers(monkeypatch):
 		assert provider.sign_in_path == '/api/user/checkin'
 		assert provider.checkin_status_path == '/api/user/checkin'
 		assert provider.needs_waf_cookies() is False
+
+	# gorouter 整站被 Cloudflare 拦截，默认走浏览器点击签到；justwoker 未拦截，保持 httpx 流程
+	assert config.providers['gorouter'].needs_browser_click_check_in() is True
+	assert config.providers['gorouter'].checkin_page_path == '/profile'
+	assert config.providers['justwoker'].needs_browser_click_check_in() is False
 
 
 def test_legacy_providers_keep_session_flow(monkeypatch):
@@ -399,6 +407,95 @@ async def test_check_in_account_dispatches_to_v2(monkeypatch):
 
 	assert success is True
 	assert called['provider'] == 'gorouter'
+
+
+# ---------------------------------------------------------------------------
+# 浏览器点击签到（browser_click_check_in）
+# ---------------------------------------------------------------------------
+
+
+def test_parse_user_info_payload_success():
+	info = parse_user_info_payload({'success': True, 'data': {'quota': 5000000, 'used_quota': 500000}}, 1000000)
+
+	assert info['success'] is True
+	assert info['quota'] == 5.0
+	assert info['used_quota'] == 0.5
+
+
+def test_parse_user_info_payload_error_message():
+	info = parse_user_info_payload({'success': False, 'message': '无效的令牌'})
+
+	assert info['success'] is False
+	assert info['error'] == '无效的令牌'
+
+
+def test_parse_checked_in_state_true():
+	assert _parse_checked_in_state({'success': True, 'data': {'stats': {'checked_in_today': True}}}) is True
+	assert _parse_checked_in_state({'success': True, 'data': {'stats': {'checked_in_today': False}}}) is False
+
+
+def test_parse_checked_in_state_unknown():
+	assert _parse_checked_in_state({'success': False}) is None
+	assert _parse_checked_in_state({'success': True, 'data': {'stats': {}}}) is None
+	assert _parse_checked_in_state({'success': True, 'data': None}) is None
+	assert _parse_checked_in_state(None) is None
+
+
+def test_interpret_browser_checkin_from_post_success():
+	assert _interpret_browser_checkin(None, None, {'success': True, 'data': {'quota_awarded': 12500000}}) is True
+
+
+def test_interpret_browser_checkin_from_post_already_checked():
+	assert _interpret_browser_checkin(None, None, {'success': False, 'message': '今日已签到'}) is True
+
+
+def test_interpret_browser_checkin_from_post_failure():
+	assert _interpret_browser_checkin(None, None, {'success': False, 'message': '签到功能未启用'}) is False
+
+
+def test_interpret_browser_checkin_fallback_reward():
+	before = {'success': True, 'quota': 10.0, 'used_quota': 1.0}
+	after = {'success': True, 'quota': 35.0, 'used_quota': 1.0}
+
+	assert _interpret_browser_checkin(before, after, None) is True
+
+
+def test_interpret_browser_checkin_fallback_no_reward():
+	before = {'success': True, 'quota': 10.0, 'used_quota': 1.0}
+	after = {'success': True, 'quota': 10.0, 'used_quota': 1.0}
+
+	assert _interpret_browser_checkin(before, after, None) is False
+
+
+@pytest.mark.asyncio
+async def test_check_in_account_v2_dispatches_to_browser_click(monkeypatch):
+	import checkin
+
+	monkeypatch.delenv('PROVIDERS', raising=False)
+	called = {}
+
+	async def fake_browser(account, account_name, provider_config):
+		called['provider'] = provider_config.name
+		return True, None, None
+
+	monkeypatch.setattr(checkin, 'check_in_account_v2_browser', fake_browser)
+
+	account = AccountConfig.from_dict({'provider': 'gorouter', 'access_token': 'tok'}, 0)
+	success, _, _ = await checkin.check_in_account_v2(account, 'acct', AppConfig.load_from_env().providers['gorouter'])
+
+	assert success is True
+	assert called['provider'] == 'gorouter'
+
+
+@pytest.mark.asyncio
+async def test_check_in_account_v2_browser_requires_access_token():
+	gorouter = AppConfig.load_from_env().providers['gorouter']
+	account = AccountConfig.from_dict({'provider': 'gorouter'}, 0)
+
+	success, before, after = await check_in_account_v2(account, 'acct', gorouter)
+
+	assert success is False
+	assert before is None and after is None
 
 
 class _ctx:
