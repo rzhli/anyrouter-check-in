@@ -79,7 +79,13 @@ def test_builtin_newapi_v2_providers(monkeypatch):
 	monkeypatch.delenv('PROVIDERS', raising=False)
 	config = AppConfig.load_from_env()
 
-	for name, domain in (('gorouter', 'https://gorouter.app'), ('justwoker', 'https://api.justwoker.icu')):
+	for name, domain in (
+		('gorouter', 'https://gorouter.app'),
+		('justwoker', 'https://api.justwoker.icu'),
+		('seekai', 'https://seekai.cc'),
+		('tabitoken', 'https://tabitoken.com'),
+		('kktoken', 'https://kktoken.cc'),
+	):
 		provider = config.providers[name]
 		assert provider.flow == 'newapi_v2'
 		assert provider.uses_access_token() is True
@@ -89,9 +95,11 @@ def test_builtin_newapi_v2_providers(monkeypatch):
 		assert provider.checkin_status_path == '/api/user/checkin'
 		assert provider.needs_waf_cookies() is False
 
-	# gorouter 整站被 Cloudflare 拦截，默认走浏览器点击签到；justwoker 未拦截，保持 httpx 流程
-	assert config.providers['gorouter'].needs_browser_click_check_in() is True
-	assert config.providers['gorouter'].checkin_page_path == '/profile'
+	# gorouter, seekai, tabitoken, kktoken 需要 Cloudflare Turnstile 验证，默认走浏览器点击签到
+	# justwoker 未拦截，保持 httpx 流程
+	for name in ('gorouter', 'seekai', 'tabitoken', 'kktoken'):
+		assert config.providers[name].needs_browser_click_check_in() is True
+		assert config.providers[name].checkin_page_path == '/profile'
 	assert config.providers['justwoker'].needs_browser_click_check_in() is False
 
 

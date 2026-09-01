@@ -7,7 +7,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router、Agent Router、GoRouter、JustDoWork，其它可根据文档进行摸索配置。
+多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router、Agent Router、GoRouter、JustDoWork、SeekAI、TabiToken、KKToken，其它可根据文档进行摸索配置。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
@@ -96,9 +96,9 @@
 
 - 如果未提供 `provider` 字段，默认使用 `anyrouter`（向后兼容）
 - 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称
-- `anyrouter`、`agentrouter`、`gorouter`、`justwoker` 配置已内置，无需填写
+- `anyrouter`、`agentrouter`、`gorouter`、`justwoker`、`seekai`、`tabitoken`、`kktoken` 配置已内置，无需填写
 
-### 4.1 新版 NewAPI 站点（GoRouter / JustDoWork）
+### 4.1 新版 NewAPI 站点（GoRouter / JustDoWork / SeekAI / TabiToken / KKToken）
 
 新版 NewAPI（`v1.0.0-rc` 起）改用 `Authorization: Bearer` 鉴权，`session` cookie 与 `new-api-user` 请求头都已失效，且签到接口带 Cloudflare Turnstile 校验。这类站点走 `flow: "newapi_v2"` 流程，只需要一个长期有效的系统访问令牌。
 
@@ -117,6 +117,21 @@
     "name": "JustDoWork",
     "provider": "justwoker",
     "access_token": "你在 JustDoWork 生成的令牌"
+  },
+  {
+    "name": "SeekAI",
+    "provider": "seekai",
+    "access_token": "你在 SeekAI 生成的令牌"
+  },
+  {
+    "name": "TabiToken",
+    "provider": "tabitoken",
+    "access_token": "你在 TabiToken 生成的令牌"
+  },
+  {
+    "name": "KKToken",
+    "provider": "kktoken",
+    "access_token": "你在 KKToken 生成的令牌"
   }
 ]
 ```
@@ -128,9 +143,9 @@
 3. 未签到时启动 CloakBrowser 打开 `/sign-in`，从 Turnstile widget 取回 token
 4. 带 token 请求 `POST /api/user/checkin?turnstile=<token>` 完成签到，再读一次余额算差额
 
-**浏览器点击签到（适用 `gorouter` 等整站被 Cloudflare 拦截的站点）**：
+**浏览器点击签到（适用 `gorouter`、`seekai`、`tabitoken`、`kktoken` 等有 Cloudflare Turnstile 验证的站点）**：
 
-`gorouter.app` 整站都套了 Cloudflare，上面的 HTTP 直连流程会被 `Sorry, you have been blocked` 拦截。这类站点改用浏览器点击签到：
+`gorouter.app`、`seekai.cc`、`tabitoken.com`、`kktoken.cc` 等站点的签到接口需要 Cloudflare Turnstile 验证，部分站点在自动签到时会弹出安全验证对话框要求手动点击。这类站点改用浏览器点击签到：
 
 1. 启动 CloakBrowser 打开站点，通过 Cloudflare 挑战（拿到通行 cookie）
 2. 把访问令牌写入前端 `localStorage`，让 SPA 视为已登录
