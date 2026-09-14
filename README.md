@@ -7,7 +7,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router、Agent Router、GoRouter、JustDoWork、SeekAI、TabiToken、KKToken，其它可根据文档进行摸索配置。
+多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router、JustWorker、HCNSec，其它可根据文档进行摸索配置。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
@@ -71,13 +71,13 @@
   },
   {
     "name": "备用账号",
-    "provider": "agentrouter",
+    "provider": "anyrouter",
     "email": "account2@example.com",
     "password": "account2_password"
   },
   {
-    "name": "GoRouter",
-    "provider": "gorouter",
+    "name": "JustWorker",
+    "provider": "justwoker",
     "access_token": "你的系统访问令牌"
   }
 ]
@@ -92,13 +92,13 @@
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
 
-**默认值说明**：
+**默认值说明**： 
 
 - 如果未提供 `provider` 字段，默认使用 `anyrouter`（向后兼容）
 - 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称
-- `anyrouter`、`agentrouter`、`gorouter`、`justwoker`、`seekai`、`tabitoken`、`kktoken` 配置已内置，无需填写
+- `anyrouter`、`justwoker`、`hcnsec` 配置已内置，无需填写
 
-### 4.1 新版 NewAPI 站点（GoRouter / JustDoWork / SeekAI / TabiToken / KKToken）
+### 4.1 新版 NewAPI 站点（JustWorker / HCNSec）
 
 新版 NewAPI（`v1.0.0-rc` 起）改用 `Authorization: Bearer` 鉴权，`session` cookie 与 `new-api-user` 请求头都已失效，且签到接口带 Cloudflare Turnstile 校验。这类站点走 `flow: "newapi_v2"` 流程，只需要一个长期有效的系统访问令牌。
 
@@ -109,54 +109,28 @@
 ```json
 [
   {
-    "name": "GoRouter",
-    "provider": "gorouter",
-    "access_token": "你在 GoRouter 生成的令牌"
-  },
-  {
-    "name": "JustDoWork",
+    "name": "JustWorker",
     "provider": "justwoker",
-    "access_token": "你在 JustDoWork 生成的令牌"
+    "access_token": "你在 JustWorker 生成的令牌"
   },
   {
-    "name": "SeekAI",
-    "provider": "seekai",
-    "access_token": "你在 SeekAI 生成的令牌"
-  },
-  {
-    "name": "TabiToken",
-    "provider": "tabitoken",
-    "access_token": "你在 TabiToken 生成的令牌"
-  },
-  {
-    "name": "KKToken",
-    "provider": "kktoken",
-    "access_token": "你在 KKToken 生成的令牌"
+    "name": "HCNSec",
+    "provider": "hcnsec",
+    "access_token": "你在 HCNSec 生成的令牌"
   }
 ]
 ```
 
-签到流程（HTTP 直连，适用 `justwoker` 等未被 Cloudflare 拦截的站点）：
+签到流程（HTTP 直连，适用 `justwoker`、`hcnsec` 等未被 Cloudflare 拦截的站点）：
 
 1. 用令牌请求 `/api/user/self` 读取签到前余额
 2. 请求 `/api/user/checkin?month=YYYY-MM` 判断今日是否已签到；已签到则直接结束，**不启动浏览器**
 3. 未签到时启动 CloakBrowser 打开 `/sign-in`，从 Turnstile widget 取回 token
 4. 带 token 请求 `POST /api/user/checkin?turnstile=<token>` 完成签到，再读一次余额算差额
 
-**浏览器点击签到（适用 `gorouter`、`seekai`、`tabitoken`、`kktoken` 等有 Cloudflare Turnstile 验证的站点）**：
-
-`gorouter.app`、`seekai.cc`、`tabitoken.com`、`kktoken.cc` 等站点的签到接口需要 Cloudflare Turnstile 验证，部分站点在自动签到时会弹出安全验证对话框要求手动点击。这类站点改用浏览器点击签到：
-
-1. 启动 CloakBrowser 打开站点，通过 Cloudflare 挑战（拿到通行 cookie）
-2. 把访问令牌写入前端 `localStorage`，让 SPA 视为已登录
-3. 打开 `/profile`，读取签到前余额并判断今日是否已签到
-4. 点击“签到”按钮，由浏览器自动通过 Turnstile 并提交 `POST /api/user/checkin`
-5. 读取签到后余额，计算差额
-
 注意事项：
 
 - 必须使用 CloakBrowser 自带的 Chromium。Playwright 自带的 Chromium 中 `navigator.webdriver` 恒为 `true`、UA 含 `HeadlessChrome`，Turnstile 不会签发 token（实测无法通过）
-- 浏览器点击签到通过持久化浏览器 profile 复用 Cloudflare 通行 cookie，`CHECKIN_BROWSER_PROFILE_DIR` 可自定义存放目录
 - 两类站点无需 xvfb，`CHECKIN_HEADLESS=true` 即可
 - 令牌等价于账号长期凭证，只放进 GitHub Secrets，不要提交到仓库或明文分享；泄露后到同一页面重新生成即可失效旧令牌
 
@@ -275,7 +249,7 @@
 
 ## 自定义 Provider 配置（可选）
 
-默认情况下，`anyrouter`、`agentrouter`、`gorouter`、`justwoker` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
+默认情况下，`anyrouter`、`justwoker`、`hcnsec` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
 
 ### 基础配置（仅域名）
 
@@ -348,7 +322,7 @@
 
 可以访问 `https://站点域名/api/status` 确认是否属于这类站点：返回体里包含 `checkin_enabled`、`turnstile_check`、`quota_per_unit` 则是。
 
-> 注：`anyrouter`、`agentrouter`、`gorouter`、`justwoker` 已内置默认配置，无需在 `PROVIDERS` 中配置
+> 注：`anyrouter`、`justwoker`、`hcnsec` 已内置默认配置，无需在 `PROVIDERS` 中配置
 
 ### 在 GitHub Actions 中配置
 
@@ -392,29 +366,25 @@
 }
 ```
 
-**内置配置说明**：
+**内置配置说明**： 
 
 - `anyrouter`：
   - `bypass_method: "waf_cookies"`（需要先获取 WAF cookies，然后执行签到）
   - `sign_in_path: "/api/user/sign_in"`
-- `agentrouter`：
-  - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
-  - `sign_in_path: null`（查询用户信息时自动签到）
-  - `use_proxy: true`
-- `gorouter`、`justwoker`：
+- `justwoker`、`hcnsec`：
   - `flow: "newapi_v2"`（Bearer 访问令牌 + Turnstile，需要账号配置 `access_token`）
   - `login_path: "/sign-in"`、`sign_in_path: "/api/user/checkin"`
   - `bypass_method: null`（不需要 WAF cookies）
-  - `gorouter` 额外开启 `browser_click_check_in: true`（整站被 Cloudflare 拦截，需浏览器点击签到）；`justwoker` 保持 HTTP 直连流程
+  - HTTP 直连流程（无需浏览器点击签到）
 
-**重要提示**：
+**重要提示**： 
 
-- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`agentrouter`、`gorouter`、`justwoker`
+- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`justwoker`、`hcnsec`
 - 自定义的 provider 配置会覆盖同名的默认配置
 
 ## 代理配置（可选）
 
-内置的 `agentrouter` 默认 `use_proxy: true`。如果你的运行环境访问该平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理。
+如果你的运行环境访问某个平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理。
 
 在仓库 Settings -> Environments -> production -> Environment secrets 中添加：
 
@@ -424,7 +394,7 @@
 
 ```bash
 CHECKIN_PROXY_URL=http://127.0.0.1:7890
-PROVIDERS={"agentrouter":{"use_proxy":true}}
+PROVIDERS={"justwoker":{"use_proxy":true}}
 ```
 
 如果使用订阅脚本，默认会用 `https://www.google.com/generate_204` 测试代理连通性；也可以通过 `PROXY_TEST_URL` 覆盖。

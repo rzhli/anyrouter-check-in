@@ -9,7 +9,8 @@ def test_builtin_provider_profile_persistence_defaults(monkeypatch):
 	config = AppConfig.load_from_env()
 
 	assert config.providers['anyrouter'].persist_profile is True
-	assert config.providers['agentrouter'].persist_profile is False
+	assert config.providers['justwoker'].persist_profile is False
+	assert config.providers['hcnsec'].persist_profile is False
 
 
 def test_provider_profile_persistence_can_override_builtin(monkeypatch):
@@ -18,7 +19,7 @@ def test_provider_profile_persistence_can_override_builtin(monkeypatch):
 		json.dumps(
 			{
 				'anyrouter': {'domain': 'https://anyrouter.top', 'persist_profile': False},
-				'agentrouter': {'domain': 'https://agentrouter.org', 'persist_profile': True},
+				'justwoker': {'domain': 'https://api.justwoker.icu', 'persist_profile': True},
 			}
 		),
 	)
@@ -26,7 +27,7 @@ def test_provider_profile_persistence_can_override_builtin(monkeypatch):
 	config = AppConfig.load_from_env()
 
 	assert config.providers['anyrouter'].persist_profile is False
-	assert config.providers['agentrouter'].persist_profile is True
+	assert config.providers['justwoker'].persist_profile is True
 
 
 def test_custom_provider_profile_persistence_defaults_to_false(monkeypatch):
