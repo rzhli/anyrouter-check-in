@@ -89,7 +89,7 @@ jobs:
         CHECKIN_HUMANIZE: true
         CHECKIN_WAIT_TIMEOUT_MS: 120000
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
-        GITHUB_SESSION_STATE: ${{ secrets.GITHUB_SESSION_STATE }}
+        GH_SESSION_STATE: ${{ secrets.GH_SESSION_STATE }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
         EMAIL_USER: ${{ secrets.EMAIL_USER }}

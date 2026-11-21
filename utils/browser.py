@@ -1071,7 +1071,7 @@ async def login_with_github_oauth(
 					)
 				elif unattended and state == 'login-form' and (not username or not password):
 					error = (
-						'GitHub is not logged in and credentials are missing; import or refresh GITHUB_SESSION_STATE '
+						'GitHub is not logged in and credentials are missing; import or refresh GH_SESSION_STATE '
 						'using scripts/github_session.py, or configure github_username and github_password '
 						'inside the AgentRouter entry of ANYROUTER_ACCOUNTS. '
 						'The AgentRouter access_token cannot log in to GitHub'

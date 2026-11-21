@@ -202,7 +202,7 @@ async def login_with_credentials(
 				await context.add_cookies(github_cookies)
 			except Exception:
 				raise GitHubSessionError(
-					'Cannot import GitHub session; export and update GITHUB_SESSION_STATE again'
+					'Cannot import GitHub session; export and update GH_SESSION_STATE again'
 				) from None
 			print(f'[INFO] {account_name}: Imported GitHub session from Secret; no password or 2FA seed is needed')
 		page = await context.new_page()

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
 	from playwright._impl._api_structures import SetCookieParam
 
-GITHUB_SESSION_ENV = 'GITHUB_SESSION_STATE'
+GITHUB_SESSION_ENV = 'GH_SESSION_STATE'
 MAX_SESSION_BYTES = 48 * 1024
 COOKIE_FIELDS = ('name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure', 'sameSite')
 
@@ -78,7 +78,7 @@ def parse_github_sessions(raw: str) -> dict[str, list[SetCookieParam]]:
 	try:
 		payload = json.loads(raw, object_pairs_hook=_unique_object)
 	except (json.JSONDecodeError, RecursionError):
-		raise GitHubSessionError('GITHUB_SESSION_STATE must contain valid session JSON') from None
+		raise GitHubSessionError('GH_SESSION_STATE must contain valid session JSON') from None
 	if not isinstance(payload, dict) or type(payload.get('version')) is not int or payload['version'] != 1:
 		raise GitHubSessionError('Unsupported GitHub session format; export it again using scripts/github_session.py')
 	accounts = payload.get('accounts')

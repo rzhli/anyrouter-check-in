@@ -82,7 +82,7 @@
 - `cookies`：AnyRouter 的 Cookie 字典或 Cookie 字符串；AnyRouter 不需要 `api_user`
 - `email` + `password`：AnyRouter 也可通过邮箱或用户名登录，自动获取 Cookie
 - `access_token`：AgentRouter 的系统访问令牌，放在 GitHub Secret 中
-- `GITHUB_SESSION_STATE`：独立的可选 Environment Secret；由本地工具导出已完成 2FA 的 GitHub 会话，按账号 `name` 匹配
+- `GH_SESSION_STATE`：独立的可选 Environment Secret；由本地工具导出已完成 2FA 的 GitHub 会话，按账号 `name` 匹配
 - `github_username` + `github_password`：可选；没有时复用持久化浏览器 profile 中的 GitHub 登录态
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
@@ -101,7 +101,7 @@ AgentRouter 没有独立的签到接口，网页签到的实际流程是：先�
 
 首次使用时，在本地设置 `CHECKIN_HEADLESS=false`，必要时增大 `CHECKIN_WAIT_TIMEOUT_MS`，在打开的浏览器中完成 GitHub 登录、授权和二次验证，之后可复用同一个账号名称对应的 `.browser_profiles/agentrouter/` profile。也可配置 `github_username` 和 `github_password` 自动填写登录表单；遇到二次验证仍需人工完成，超时会明确报告失败。
 
-GitHub Actions 的运行环境不会自动获得本地 profile。启用 2FA 时，推荐使用下方本地工具完成一次人工认证，再导入 `GITHUB_SESSION_STATE`。仅配置系统访问令牌不足以完成签到。Actions 使用临时浏览器，不保存或恢复包含登录凭据的 profile 缓存；本地正常签到仍可复用持久化 profile。
+GitHub Actions 的运行环境不会自动获得本地 profile。启用 2FA 时，推荐使用下方本地工具完成一次人工认证，再导入 `GH_SESSION_STATE`。仅配置系统访问令牌不足以完成签到。Actions 使用临时浏览器，不保存或恢复包含登录凭据的 profile 缓存；本地正常签到仍可复用持久化 profile。
 
 `github_username` 和 `github_password` 放在 `ANYROUTER_ACCOUNTS` 的 AgentRouter 对象内，不是单独的 Actions Secret。已有可用的 GitHub 登录态时可以省略。遇到登录表单缺少凭据、GitHub 登录错误或二次验证时，脚本会给出针对性提示；调试模式会保存 OAuth 新窗口的截图，日志中的页面地址不包含查询参数和片段。截图可能包含账号信息，请勿公开分享。
 
@@ -127,12 +127,18 @@ uv run --extra firefox python scripts/github_session.py --browser firefox --acco
 
 `firefox` 是可选依赖，仅为本地导出工具安装 Selenium。Firefox 必须在 `PATH` 中；Selenium Manager 首次运行会下载较小的 `geckodriver`，若该下载也受网络限制，请自行安装 `geckodriver` 并加入 `PATH`。工具启动独立临时 Firefox profile，不读取或修改你日常 Firefox 的已登录会话，因此仍需在新窗口完成一次登录和 2FA，结束后关闭临时浏览器。Actions 的签到浏览器仍使用 CloakBrowser，不受此选项影响。
 
-4. 在新打开的本地浏览器中，用绑定 AgentRouter 的 GitHub 账号完成用户名、密码、六位验证码和必要的设备验证。完成后回到终端按 Enter。工具会访问 GitHub 的个人设置页确认已登录，只导出 `github.com` Cookie，并通过 `gh` 的标准 Secret 加密上传流程更新 `production` 的 `GITHUB_SESSION_STATE`。密码、验证码、2FA 密钥和浏览器 profile 均不导出；导出的 JSON 通过标准输入提交，不生成会话文件，也不出现在命令参数或终端输出中。
+4. 在新打开的本地浏览器中，用绑定 AgentRouter 的 GitHub 账号完成用户名、密码、六位验证码和必要的设备验证。完成后回到终端按 Enter。工具会访问 GitHub 的个人设置页确认已登录，只导出 `github.com` Cookie，并通过 `gh` 的标准 Secret 加密上传流程更新 `production` 的 `GH_SESSION_STATE`。密码、验证码、2FA 密钥和浏览器 profile 均不导出；导出的 JSON 通过标准输入提交，不生成会话文件，也不出现在命令参数或终端输出中。
 5. 重新运行 Actions。脚本按账号名称导入会话，退出时仅清理 AgentRouter 登录态，保留 GitHub Cookie；因此通常可直接完成 OAuth，无需在 Actions 中输入六位验证码。`ANYROUTER_ACCOUNTS` 中可以省略 `github_username` 和 `github_password`。
 
 本地工具默认直连；需要代理时先设置 `CHECKIN_PROXY_URL`，再添加 `--use-proxy`。Firefox 支持明确指定端口、不包含用户名密码的 HTTP 或 SOCKS5 代理，例如 `http://127.0.0.1:7890`；代理选项不控制 Selenium Manager 的驱动下载。`--environment` 可覆盖默认的 `production`。多个 AgentRouter 账号可重复传入 `--account-name`，每个账号都会打开独立浏览器供你登录；一次上传替换整个 Secret，因此应同时导出所有需要的账号。
 
-若不能直接上传，可使用 `--output .session_exports/github-session.json` 代替 `--repo`，再将文件全部内容粘贴到 `production` 的 `GITHUB_SESSION_STATE` Secret。文件权限为 `0600`，目录已加入 `.gitignore`，已存在的文件不会被覆盖。它是明文登录凭证，导入后请删除，不要发送到聊天、提交到仓库或上传为 artifact。
+使用 `--repo` 时，工具会在打开登录浏览器前只读预检目标 Environment 的 Secret 公钥接口。未登录 `gh`、仓库/环境名称错误或接口不可访问时先停止，避免白做一次 2FA；预检通过不保证后续写入一定成功。浏览器中的 GitHub 登录不能代替 GitHub CLI 认证。失败提示仅按认证、权限、目标不存在、网络等类别给出建议，不输出可能包含会话的原始 CLI 响应。
+
+预检和上传遇到网络超时、连接失败或 GitHub 5xx 时，最多额外重试两次；明确的认证、权限、目标不存在和限流错误不会自动重试。浏览器的 `--use-proxy` 不会给 `gh` 配置代理，CLI 网络需要在终端单独配置。
+
+若不能直接上传，可使用 `--output .session_exports/github-session.json` 代替 `--repo`，再将文件全部内容粘贴到仓库 Settings → Environments → `production` → Environment secrets 的 `GH_SESSION_STATE` Secret。这条路径不需要 `gh` 认证。文件权限为 `0600`，目录已加入 `.gitignore`，已存在的文件不会被覆盖。它是明文登录凭证，导入后请删除，不要发送到聊天、提交到仓库或上传为 artifact。默认直接上传失败时不会自动保存会话；此时需要重新导出。
+
+Secret 名称必须是 `GH_SESSION_STATE`，不要以 GitHub 保留的 `GITHUB_` 前缀命名。已有导出文件的 JSON 格式不变，无需为更名重新登录或导出。
 
 **会话不是永久有效，也不能绕过 GitHub 的安全策略。** 会话过期、退出、撤销或换出口后被要求重新验证时，需要再次运行工具更新 Secret；不要关闭 2FA，也不要把六位验证码或 2FA 密钥配置到 Actions。会话与密码一样敏感，应仅允许可信维护者修改使用该 Secret 的 workflow。若旧版本已生成 `browser-profiles-*` 缓存，请在 Actions → Caches 中删除这些缓存；移除缓存步骤不会自动删除历史缓存。
 

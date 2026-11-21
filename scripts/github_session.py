@@ -9,10 +9,11 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -77,7 +78,13 @@ async def capture_github_session(
 		await context.close()
 
 
-def upload_session_secret(payload: str, repo: str, environment: str) -> None:
+def _resolve_secret_cli(repo: str, environment: str) -> str:
+	if GITHUB_SESSION_ENV.upper().startswith('GITHUB_') or not re.fullmatch(
+		r'[A-Za-z_][A-Za-z0-9_]*', GITHUB_SESSION_ENV
+	):
+		raise GitHubSessionError(
+			'Invalid session Secret name; use GH_SESSION_STATE without the reserved GITHUB_ prefix'
+		)
 	if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
 		raise GitHubSessionError('--repo must use owner/repository format')
 	if not environment.strip() or environment.startswith('-'):
@@ -85,21 +92,90 @@ def upload_session_secret(payload: str, repo: str, environment: str) -> None:
 	gh_path = shutil.which('gh')
 	if not gh_path:
 		raise GitHubSessionError('GitHub CLI is not installed; install gh and run gh auth login before uploading')
-	try:
-		result = subprocess.run(
-			[gh_path, 'secret', 'set', GITHUB_SESSION_ENV, '--repo', repo, '--env', environment],
-			input=payload,
-			text=True,
-			capture_output=True,
-			timeout=60,
-			check=False,
+	return gh_path
+
+
+def _classify_secret_failure(stderr: str) -> tuple[str, bool]:
+	message = stderr.lower()
+	if 'secret names' in message and 'github_' in message:
+		return 'GitHub reserves the GITHUB_ prefix; update the exporter and workflow to use GH_SESSION_STATE', False
+	if 'http 401' in message or 'bad credentials' in message or 'gh auth login' in message:
+		return (
+			'GitHub CLI authentication failed; run gh auth login --hostname github.com and check gh auth status',
+			False,
 		)
-	except (OSError, subprocess.TimeoutExpired):
-		raise GitHubSessionError('Secret upload failed; install/authenticate gh and check network access') from None
-	if result.returncode != 0:
-		raise GitHubSessionError(
-			'Secret upload failed; check gh authentication, repository access and environment name'
+	if 'http 429' in message or 'rate limit' in message:
+		return 'GitHub API rate limit reached; wait before retrying', False
+	if 'http 403' in message or 'resource not accessible' in message or 'forbidden' in message:
+		return (
+			'GitHub denied access (HTTP 403); check repository admin access and token permissions for environment secrets',
+			False,
 		)
+	if 'http 404' in message or 'not found' in message:
+		return 'GitHub could not access the target (HTTP 404); check --repo, --environment and token access', False
+	if 'http 422' in message:
+		return 'GitHub rejected the secret (HTTP 422); check the secret size and environment restrictions', False
+	if re.search(r'http 5\d\d', message):
+		return 'GitHub API is temporarily unavailable; retry later', True
+	if any(
+		fragment in message
+		for fragment in (
+			'timeout',
+			'connection',
+			'error connecting',
+			'tls',
+			'resolve host',
+			'no such host',
+			'unexpected eof',
+			'dial tcp',
+			'broken pipe',
+			'temporary failure in name resolution',
+		)
+	):
+		return 'GitHub CLI network request failed; check terminal network/proxy settings and retry', True
+	return 'Check gh auth status, repository access and environment name; alternatively export with --output', False
+
+
+def _run_secret_command(command: list[str], *, payload: str | None = None, action: str) -> None:
+	for attempt in range(3):
+		try:
+			result = subprocess.run(
+				command,
+				input=payload,
+				text=True,
+				capture_output=True,
+				timeout=60,
+				check=False,
+			)
+		except subprocess.TimeoutExpired:
+			failure = f'{action} timed out; check GitHub CLI network access and retry'
+			retryable = True
+		except OSError:
+			raise GitHubSessionError(f'{action} failed; check the gh installation and executable permissions') from None
+		else:
+			if result.returncode == 0:
+				return
+			hint, retryable = _classify_secret_failure(result.stderr or '')
+			failure = f'{action} failed: {hint}'
+		if not retryable or attempt == 2:
+			raise GitHubSessionError(failure) from None
+		print(f'{action}: temporary request failure; retrying ({attempt + 2}/3)...')
+		time.sleep(attempt + 1)
+
+
+def check_secret_upload_access(repo: str, environment: str) -> None:
+	gh_path = _resolve_secret_cli(repo, environment)
+	endpoint = f'repos/{repo}/environments/{quote(environment, safe="")}/secrets/public-key'
+	_run_secret_command([gh_path, 'api', endpoint, '--silent'], action='Secret access check')
+
+
+def upload_session_secret(payload: str, repo: str, environment: str) -> None:
+	gh_path = _resolve_secret_cli(repo, environment)
+	_run_secret_command(
+		[gh_path, 'secret', 'set', GITHUB_SESSION_ENV, '--repo', repo, '--env', environment],
+		payload=payload,
+		action='Secret upload',
+	)
 
 
 def write_private_session_file(path: Path, payload: str) -> None:
@@ -117,6 +193,8 @@ def write_private_session_file(path: Path, payload: str) -> None:
 async def run(args: argparse.Namespace) -> None:
 	if os.getenv('GITHUB_ACTIONS', '').lower() == 'true':
 		raise GitHubSessionError('Session export must run on your local desktop, not in Actions')
+	if args.repo:
+		check_secret_upload_access(args.repo, args.environment)
 	accounts = {}
 	for name in args.account_name:
 		if not name.strip() or name in accounts:

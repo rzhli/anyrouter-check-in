@@ -141,6 +141,7 @@ async def test_firefox_selection_does_not_launch_or_download_cloakbrowser(monkey
 @pytest.mark.asyncio
 async def test_export_command_passes_selected_browser(monkeypatch):
 	monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+	monkeypatch.setattr(exporter, 'check_secret_upload_access', Mock())
 	capture = AsyncMock(return_value=[])
 	monkeypatch.setattr(exporter, 'capture_github_session', capture)
 	monkeypatch.setattr(exporter, 'encode_github_sessions', Mock(return_value='private-session-json'))
