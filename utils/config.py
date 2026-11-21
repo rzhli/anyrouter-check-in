@@ -42,6 +42,8 @@ class ProviderConfig:
 	checkin_button_text: str | None = None
 	# 浏览器点击签到时，把访问令牌写入 SPA 的 localStorage 键名（默认 token）
 	token_storage_key: str = 'token'
+	# AgentRouter 的每日签到由重新执行 GitHub OAuth 触发。
+	github_oauth: bool = False
 
 	def __post_init__(self):
 		required_waf_cookies = set()
@@ -71,7 +73,7 @@ class ProviderConfig:
 		default_persist_profile = defaults.persist_profile if defaults else False
 		return cls(
 			name=name,
-			domain=data['domain'],
+			domain=data.get('domain', defaults.domain) if defaults else data['domain'],
 			login_path=data.get('login_path', defaults.login_path if defaults else '/login'),
 			sign_in_path=data.get('sign_in_path', defaults.sign_in_path if defaults else '/api/user/sign_in'),
 			user_info_path=data.get('user_info_path', defaults.user_info_path if defaults else '/api/user/self'),
@@ -92,6 +94,7 @@ class ProviderConfig:
 			),
 			checkin_button_text=data.get('checkin_button_text', defaults.checkin_button_text if defaults else None),
 			token_storage_key=data.get('token_storage_key', defaults.token_storage_key if defaults else 'token'),
+			github_oauth=data.get('github_oauth', defaults.github_oauth if defaults else False),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -137,44 +140,17 @@ class AppConfig:
 				name='agentrouter',
 				domain='https://agentrouter.org',
 				login_path='/login',
-				sign_in_path=None,  # 无需签到接口，查询用户信息时自动完成签到
+				sign_in_path=None,
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc'],
 				use_proxy=True,
-				persist_profile=False,
-			),
-			'gorouter': ProviderConfig(
-				name='gorouter',
-				domain='https://gorouter.app',
-				login_path='/sign-in',
-				sign_in_path='/api/user/checkin',
-				user_info_path='/api/user/self',
-				bypass_method=None,
-				use_proxy=False,
-				# 浏览器点击签到需要复用登录态 / CF 通行 cookie，使用持久化浏览器 profile
 				persist_profile=True,
-				flow='newapi_v2',
-				checkin_status_path='/api/user/checkin',
-				# gorouter.app 整站被 Cloudflare 拦截，httpx 无法直连 API；
-				# 需在真实浏览器里打开 /profile 点击签到按钮，由浏览器通过 CF + Turnstile。
-				browser_click_check_in=True,
-				checkin_page_path='/profile',
-			),
-			'justwoker': ProviderConfig(
-				name='justwoker',
-				domain='https://api.justwoker.icu',
-				login_path='/sign-in',
-				sign_in_path='/api/user/checkin',
-				user_info_path='/api/user/self',
-				bypass_method=None,
-				use_proxy=False,
-				persist_profile=False,
-				flow='newapi_v2',
-				checkin_status_path='/api/user/checkin',
+				github_oauth=True,
 			),
 		}
+		supported_providers = frozenset(providers)
 
 		# 尝试从环境变量加载自定义 providers
 		providers_str = os.getenv('PROVIDERS')
@@ -188,6 +164,9 @@ class AppConfig:
 
 				# 解析自定义 providers,会覆盖默认配置
 				for name, provider_data in providers_data.items():
+					if name not in supported_providers:
+						print(f'[WARNING] Provider "{name}" is not supported and will be ignored')
+						continue
 					try:
 						providers[name] = ProviderConfig.from_dict(
 							name,
@@ -224,6 +203,8 @@ class AccountConfig:
 	email: str | None = None
 	password: str | None = None
 	access_token: str | None = None
+	github_username: str | None = None
+	github_password: str | None = None
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
@@ -239,6 +220,8 @@ class AccountConfig:
 			email=data.get('email'),
 			password=data.get('password'),
 			access_token=data.get('access_token'),
+			github_username=data.get('github_username'),
+			github_password=data.get('github_password'),
 		)
 
 	def has_login_credentials(self) -> bool:
@@ -246,8 +229,12 @@ class AccountConfig:
 		return bool(self.email and self.password)
 
 	def has_access_token(self) -> bool:
-		"""是否配置了访问令牌（newapi_v2 流程使用）"""
+		"""是否配置了系统访问令牌。"""
 		return bool(self.access_token and self.access_token.strip())
+
+	def has_github_credentials(self) -> bool:
+		"""是否配置了 GitHub 登录凭据；也可以使用持久化浏览器中的登录态。"""
+		return bool(self.github_username and self.github_password)
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
@@ -279,22 +266,26 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				print(f'ERROR: Account {i + 1} configuration format is incorrect')
 				return None
 
-			has_access_token = bool(account_dict.get('access_token'))
+			provider = account_dict.get('provider', 'anyrouter')
+			if provider not in {'anyrouter', 'agentrouter'}:
+				print(f'[WARNING] Account {i + 1}: Provider "{provider}" is not supported and will be ignored')
+				continue
+
+			token = account_dict.get('access_token')
+			has_access_token = isinstance(token, str) and bool(token.strip())
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
+			has_github_login = account_dict.get('github_username') and account_dict.get('github_password')
 
-			# newapi_v2 类站点用 access_token 鉴权，不需要 api_user / cookies / 邮箱密码
-			if not has_access_token:
-				if 'api_user' not in account_dict and not has_login:
-					print(
-						f'ERROR: Account {i + 1} missing required field (api_user) - '
-						'only email+password login or access_token can omit it'
-					)
-					return None
-
-				if not has_cookies and not has_login:
-					print(f'ERROR: Account {i + 1} must have either cookies, email+password, or access_token')
-					return None
+			if provider == 'anyrouter' and not has_cookies and not has_login:
+				print(f'ERROR: Account {i + 1}: AnyRouter requires cookies or email+password')
+				return None
+			if provider == 'agentrouter' and not has_access_token and not has_cookies and not has_github_login:
+				print(
+					f'ERROR: Account {i + 1}: AgentRouter requires cookies, GitHub credentials, or access_token '
+					'with a saved GitHub browser session'
+				)
+				return None
 
 			if 'name' in account_dict and not account_dict['name']:
 				print(f'ERROR: Account {i + 1} name field cannot be empty')

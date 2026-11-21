@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from utils.browser import (
 	BrowserLoginResult,
 	ResponseCollector,
+	clear_site_login_state,
 	click_check_in_button,
 	detect_checked_in_button,
 	fetch_json_via_page,
@@ -32,6 +33,7 @@ from utils.browser import (
 	launch_login_context,
 	load_browser_login_settings,
 	login_with_email_form,
+	login_with_github_oauth,
 	navigate_and_wait,
 	navigate_login_page,
 	prepare_browser_page,
@@ -150,11 +152,14 @@ async def login_with_credentials(
 	account_name: str,
 	provider_config,
 	provider_name: str,
-	email: str,
-	password: str,
+	email: str = '',
+	password: str = '',
+	*,
+	auth_method: str = 'email',
 ) -> BrowserLoginResult | None:
-	"""使用邮箱密码通过浏览器登录，返回 cookies 与拦截到的 api user id。"""
-	print(f'[PROCESSING] {account_name}: Logging in with email/password...')
+	"""通过邮箱密码或 GitHub OAuth 登录，返回 cookies 与用户标识。"""
+	method_label = 'GitHub OAuth' if auth_method == 'github' else 'email/password'
+	print(f'[PROCESSING] {account_name}: Logging in with {method_label}...')
 
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
 	settings = load_browser_login_settings(
@@ -185,6 +190,11 @@ async def login_with_credentials(
 	try:
 		page = await context.new_page()
 		await prepare_browser_page(page)
+		if auth_method == 'github':
+			await page.goto(
+				f'{provider_config.domain}/', wait_until='domcontentloaded', timeout=min(timeout_ms, 60_000)
+			)
+			await clear_site_login_state(page, provider_config.domain, timeout_ms)
 		await navigate_login_page(
 			page,
 			login_url,
@@ -193,7 +203,17 @@ async def login_with_credentials(
 			account_name=account_name,
 		)
 
-		if not await is_logged_in(page):
+		if auth_method == 'github':
+			await save_login_screenshot(page, provider_name, account_name, 'before-github-login')
+			page = await login_with_github_oauth(
+				page,
+				email,
+				password,
+				timeout_ms,
+				provider=provider_name,
+				account_name=account_name,
+			)
+		elif not await is_logged_in(page):
 			if await has_session_cookie(page):
 				print(f'[WARN] {account_name}: Stale session cookie on login page, forcing email login')
 			await save_login_screenshot(page, provider_name, account_name, 'before-email-login')
@@ -211,7 +231,7 @@ async def login_with_credentials(
 		console_url = f'{provider_config.domain}/console'
 		user_profile = await verify_browser_login(page, console_url, timeout_ms)
 		if not user_profile:
-			cookies = await context.cookies()
+			cookies = await context.cookies([provider_config.domain])
 			cookie_names = [c.get('name') for c in cookies if c.get('name')]
 			print(f'[FAILED] {account_name}: Login failed - /api/user/self not verified')
 			debug_print(f'[INFO] {account_name}: Current URL: {page.url}')
@@ -220,9 +240,9 @@ async def login_with_credentials(
 			await context.close()
 			return None
 
-		cookies = await context.cookies()
+		cookies = await context.cookies([provider_config.domain])
 		all_cookies = {
-			cookie.get('name'): cookie.get('value') for cookie in cookies if cookie.get('name') and cookie.get('value')
+			cookie['name']: cookie['value'] for cookie in cookies if cookie.get('name') and cookie.get('value')
 		}
 		api_user = str(user_profile['id']) if user_profile.get('id') is not None else None
 
@@ -755,6 +775,28 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	if provider_config.uses_access_token():
 		return await check_in_account_v2(account, account_name, provider_config)
 
+	if provider_config.github_oauth:
+		print(f'[INFO] {account_name}: AgentRouter check-in uses logout + GitHub OAuth')
+		login_result = await login_with_credentials(
+			account_name,
+			provider_config,
+			account.provider,
+			account.github_username or '',
+			account.github_password or '',
+			auth_method='github',
+		)
+		if not login_result:
+			print(f'[FAILED] {account_name}: GitHub OAuth login failed')
+			return False, None, None
+		return run_check_in_requests(
+			login_result.cookies,
+			account,
+			account_name,
+			provider_config,
+			api_user_override=login_result.api_user,
+			use_proxy=provider_config.use_proxy,
+		)
+
 	# 邮箱密码优先
 	all_cookies = None
 	resolved_api_user: str | None = None
@@ -840,6 +882,8 @@ def run_check_in_requests(
 			api_user = api_user_override or account.api_user
 			if api_user:
 				headers[provider_config.api_user_key] = api_user
+			if account.access_token and provider_config.github_oauth:
+				headers['Authorization'] = f'Bearer {account.access_token.strip()}'
 
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			user_info_before = get_user_info(client, headers, user_info_url, provider_config.quota_per_unit)
@@ -855,7 +899,10 @@ def run_check_in_requests(
 
 			user_info_after = get_user_info(client, headers, user_info_url, provider_config.quota_per_unit)
 			if user_info_after and user_info_after.get('success'):
-				print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
+				if provider_config.github_oauth:
+					print(f'[INFO] {account_name}: GitHub OAuth completed; current balance verified')
+				else:
+					print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
 				return True, user_info_before, user_info_after
 			error = user_info_after.get('error', 'Unknown error') if user_info_after else 'Unknown error'
 			print(f'[FAILED] {account_name}: Auto check-in failed - {error}')

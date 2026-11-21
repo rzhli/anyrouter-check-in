@@ -1,5 +1,6 @@
 """newapi_v2 签到流程（Bearer 访问令牌 + Turnstile）的单元测试。"""
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from checkin import (
 	is_checked_in_today,
 	parse_user_info_payload,
 )
-from utils.config import AccountConfig, AppConfig
+from utils.config import AccountConfig, AppConfig, ProviderConfig
 
 
 class FakeResponse:
@@ -67,7 +68,14 @@ def checkin_status_response(checked_in_today: bool) -> FakeResponse:
 
 @pytest.fixture
 def provider():
-	return AppConfig.load_from_env().providers['justwoker']
+	return ProviderConfig(
+		name='test-newapi',
+		domain='https://api.example.com',
+		login_path='/sign-in',
+		sign_in_path='/api/user/checkin',
+		flow='newapi_v2',
+		checkin_status_path='/api/user/checkin',
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -79,20 +87,9 @@ def test_builtin_newapi_v2_providers(monkeypatch):
 	monkeypatch.delenv('PROVIDERS', raising=False)
 	config = AppConfig.load_from_env()
 
-	for name, domain in (('gorouter', 'https://gorouter.app'), ('justwoker', 'https://api.justwoker.icu')):
-		provider = config.providers[name]
-		assert provider.flow == 'newapi_v2'
-		assert provider.uses_access_token() is True
-		assert provider.domain == domain
-		assert provider.login_path == '/sign-in'
-		assert provider.sign_in_path == '/api/user/checkin'
-		assert provider.checkin_status_path == '/api/user/checkin'
-		assert provider.needs_waf_cookies() is False
-
-	# gorouter 整站被 Cloudflare 拦截，默认走浏览器点击签到；justwoker 未拦截，保持 httpx 流程
-	assert config.providers['gorouter'].needs_browser_click_check_in() is True
-	assert config.providers['gorouter'].checkin_page_path == '/profile'
-	assert config.providers['justwoker'].needs_browser_click_check_in() is False
+	assert set(config.providers) == {'anyrouter', 'agentrouter'}
+	assert all(provider.flow == 'legacy' for provider in config.providers.values())
+	assert all(provider.uses_access_token() is False for provider in config.providers.values())
 
 
 def test_legacy_providers_keep_session_flow(monkeypatch):
@@ -106,30 +103,33 @@ def test_legacy_providers_keep_session_flow(monkeypatch):
 
 
 def test_custom_provider_can_opt_into_newapi_v2(monkeypatch):
-	monkeypatch.setenv(
-		'PROVIDERS',
-		json.dumps(
-			{
-				'mysite': {
-					'domain': 'https://my.example.com',
-					'flow': 'newapi_v2',
-					'login_path': '/sign-in',
-					'sign_in_path': '/api/user/checkin',
-					'checkin_status_path': '/api/user/checkin',
-					'quota_per_unit': 1000000,
-				}
-			}
-		),
+	provider = ProviderConfig.from_dict(
+		'test-newapi',
+		{
+			'domain': 'https://my.example.com',
+			'flow': 'newapi_v2',
+			'login_path': '/sign-in',
+			'sign_in_path': '/api/user/checkin',
+			'checkin_status_path': '/api/user/checkin',
+			'quota_per_unit': 1000000,
+		},
 	)
-	provider = AppConfig.load_from_env().providers['mysite']
 
 	assert provider.uses_access_token() is True
 	assert provider.quota_per_unit == 1000000
 
 
 def test_newapi_v2_overrides_inherit_builtin_defaults(monkeypatch):
-	monkeypatch.setenv('PROVIDERS', json.dumps({'gorouter': {'domain': 'https://gorouter.app', 'use_proxy': True}}))
-	provider = AppConfig.load_from_env().providers['gorouter']
+	provider = ProviderConfig.from_dict(
+		'test-newapi',
+		{'domain': 'https://api.example.com', 'use_proxy': True},
+		defaults=ProviderConfig(
+			name='test-newapi',
+			domain='https://old.example.com',
+			flow='newapi_v2',
+			checkin_status_path='/api/user/checkin',
+		),
+	)
 
 	assert provider.use_proxy is True
 	assert provider.flow == 'newapi_v2'
@@ -142,7 +142,7 @@ def test_newapi_v2_overrides_inherit_builtin_defaults(monkeypatch):
 
 
 def test_account_access_token_parsed():
-	account = AccountConfig.from_dict({'provider': 'gorouter', 'access_token': 'tok'}, 0)
+	account = AccountConfig.from_dict({'provider': 'agentrouter', 'access_token': 'tok'}, 0)
 
 	assert account.access_token == 'tok'
 	assert account.has_access_token() is True
@@ -160,7 +160,7 @@ def test_access_token_only_account_is_valid(monkeypatch):
 
 	monkeypatch.setenv(
 		'ANYROUTER_ACCOUNTS',
-		json.dumps([{'provider': 'gorouter', 'access_token': 'tok', 'name': 'GoRouter'}]),
+		json.dumps([{'provider': 'agentrouter', 'access_token': 'tok', 'name': 'AgentRouter'}]),
 	)
 	accounts = load_accounts_config()
 
@@ -172,7 +172,7 @@ def test_access_token_only_account_is_valid(monkeypatch):
 def test_account_without_any_credential_is_rejected(monkeypatch):
 	from utils.config import load_accounts_config
 
-	monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps([{'provider': 'gorouter', 'name': 'x'}]))
+	monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps([{'provider': 'agentrouter', 'name': 'x'}]))
 
 	assert load_accounts_config() is None
 
@@ -280,7 +280,7 @@ def test_is_checked_in_today_returns_none_without_status_path(provider):
 
 @pytest.mark.asyncio
 async def test_check_in_account_v2_requires_access_token(provider):
-	account = AccountConfig.from_dict({'provider': 'justwoker'}, 0)
+	account = AccountConfig.from_dict({'provider': 'agentrouter'}, 0)
 
 	success, before, after = await check_in_account_v2(account, 'acct', provider)
 
@@ -305,7 +305,7 @@ async def test_check_in_account_v2_skips_browser_when_already_checked_in(monkeyp
 
 	monkeypatch.setattr(checkin, 'get_turnstile_token_with_browser', fail_browser)
 
-	account = AccountConfig.from_dict({'provider': 'justwoker', 'access_token': 'tok'}, 0)
+	account = AccountConfig.from_dict({'provider': 'agentrouter', 'access_token': 'tok'}, 0)
 	success, before, after = await check_in_account_v2(account, 'acct', provider)
 
 	assert success is True
@@ -335,7 +335,7 @@ async def test_check_in_account_v2_full_flow(monkeypatch, provider):
 
 	monkeypatch.setattr(checkin, 'get_turnstile_token_with_browser', fake_browser)
 
-	account = AccountConfig.from_dict({'provider': 'justwoker', 'access_token': 'tok'}, 0)
+	account = AccountConfig.from_dict({'provider': 'agentrouter', 'access_token': 'tok'}, 0)
 	success, before, after = await check_in_account_v2(account, 'acct', provider)
 
 	assert success is True
@@ -359,7 +359,7 @@ async def test_check_in_account_v2_bad_token_fails_fast(monkeypatch, provider):
 
 	monkeypatch.setattr(checkin, 'get_turnstile_token_with_browser', fail_browser)
 
-	account = AccountConfig.from_dict({'provider': 'justwoker', 'access_token': 'bad'}, 0)
+	account = AccountConfig.from_dict({'provider': 'agentrouter', 'access_token': 'bad'}, 0)
 	success, before, after = await check_in_account_v2(account, 'acct', provider)
 
 	assert success is False
@@ -383,7 +383,7 @@ async def test_check_in_account_v2_fails_without_turnstile_token(monkeypatch, pr
 
 	monkeypatch.setattr(checkin, 'get_turnstile_token_with_browser', no_token)
 
-	account = AccountConfig.from_dict({'provider': 'justwoker', 'access_token': 'tok'}, 0)
+	account = AccountConfig.from_dict({'provider': 'agentrouter', 'access_token': 'tok'}, 0)
 	success, _, _ = await check_in_account_v2(account, 'acct', provider)
 
 	assert success is False
@@ -402,11 +402,19 @@ async def test_check_in_account_dispatches_to_v2(monkeypatch):
 
 	monkeypatch.setattr(checkin, 'check_in_account_v2', fake_v2)
 
-	account = AccountConfig.from_dict({'provider': 'gorouter', 'access_token': 'tok'}, 0)
-	success, _, _ = await checkin.check_in_account(account, 0, AppConfig.load_from_env())
+	account = AccountConfig.from_dict({'provider': 'agentrouter', 'access_token': 'tok'}, 0)
+	config = AppConfig(
+		providers={
+			'agentrouter': ProviderConfig.from_dict(
+				'agentrouter',
+				{'domain': 'https://agentrouter.org', 'flow': 'newapi_v2'},
+			)
+		}
+	)
+	success, _, _ = await checkin.check_in_account(account, 0, config)
 
 	assert success is True
-	assert called['provider'] == 'gorouter'
+	assert called['provider'] == 'agentrouter'
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +476,7 @@ def test_interpret_browser_checkin_fallback_no_reward():
 
 
 @pytest.mark.asyncio
-async def test_check_in_account_v2_dispatches_to_browser_click(monkeypatch):
+async def test_check_in_account_v2_dispatches_to_browser_click(monkeypatch, provider):
 	import checkin
 
 	monkeypatch.delenv('PROVIDERS', raising=False)
@@ -480,19 +488,19 @@ async def test_check_in_account_v2_dispatches_to_browser_click(monkeypatch):
 
 	monkeypatch.setattr(checkin, 'check_in_account_v2_browser', fake_browser)
 
-	account = AccountConfig.from_dict({'provider': 'gorouter', 'access_token': 'tok'}, 0)
-	success, _, _ = await checkin.check_in_account_v2(account, 'acct', AppConfig.load_from_env().providers['gorouter'])
+	account = AccountConfig.from_dict({'provider': 'agentrouter', 'access_token': 'tok'}, 0)
+	provider = dataclasses.replace(provider, browser_click_check_in=True)
+	success, _, _ = await checkin.check_in_account_v2(account, 'acct', provider)
 
 	assert success is True
-	assert called['provider'] == 'gorouter'
+	assert called['provider'] == provider.name
 
 
 @pytest.mark.asyncio
-async def test_check_in_account_v2_browser_requires_access_token():
-	gorouter = AppConfig.load_from_env().providers['gorouter']
-	account = AccountConfig.from_dict({'provider': 'gorouter'}, 0)
+async def test_check_in_account_v2_browser_requires_access_token(provider):
+	account = AccountConfig.from_dict({'provider': 'agentrouter'}, 0)
 
-	success, before, after = await check_in_account_v2(account, 'acct', gorouter)
+	success, before, after = await check_in_account_v2(account, 'acct', provider)
 
 	assert success is False
 	assert before is None and after is None

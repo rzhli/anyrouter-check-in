@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
@@ -24,6 +25,25 @@ EMAIL_LOGIN_BUTTON_NAMES = (
 	re.compile(r'Email or Username', re.I),
 	re.compile(r'Sign in with Email', re.I),
 	re.compile(r'Sign in with Email or Username', re.I),
+)
+GITHUB_LOGIN_BUTTON_NAMES = (
+	re.compile(r'GitHub', re.I),
+	re.compile(r'使用.*GitHub'),
+	re.compile(r'Continue with GitHub', re.I),
+)
+GITHUB_LOGIN_ENTRY_SELECTORS = (
+	'button:has-text("GitHub")',
+	'a:has-text("GitHub")',
+	'.semi-card button:has-text("GitHub")',
+	'.semi-card a:has-text("GitHub")',
+)
+GITHUB_USERNAME_SELECTORS = ('#login_field', 'input[name="login"]', 'input[type="email"]')
+GITHUB_PASSWORD_SELECTORS = ('#password', 'input[name="password"]', 'input[type="password"]')  # nosec B105
+GITHUB_SUBMIT_SELECTORS = ('input[type="submit"][name="commit"]', 'button[type="submit"]')
+GITHUB_AUTHORIZE_SELECTORS = (
+	'button[name="authorize"]',
+	'input[type="submit"][name="authorize"]',
+	'button:has-text("Authorize")',
 )
 EMAIL_LOGIN_ENTRY_SELECTORS = (
 	'.semi-card button:has(.semi-icon-mail):not(form.semi-form button)',
@@ -858,6 +878,115 @@ async def login_with_email_form(
 	)
 	await fill_email_credentials(page, email, password, timeout_ms)
 	await submit_login_form(page, timeout_ms)
+
+
+async def _click_github_login_entry(page: Page) -> bool:
+	for selector in GITHUB_LOGIN_ENTRY_SELECTORS:
+		buttons = page.locator(selector)
+		for index in range(await buttons.count()):
+			button = buttons.nth(index)
+			try:
+				if await button.is_visible() and await _click_locator(button):
+					return True
+			except Exception:  # nosec B112
+				continue
+	for pattern in GITHUB_LOGIN_BUTTON_NAMES:
+		for role in ('button', 'link'):
+			try:
+				button = page.get_by_role(role, name=pattern).first
+				if await button.is_visible() and await _click_locator(button):
+					return True
+			except Exception:  # nosec B112
+				continue
+	return False
+
+
+def _is_github_url(url: str) -> bool:
+	parsed = urlparse(url)
+	return parsed.scheme == 'https' and parsed.hostname == 'github.com'
+
+
+async def clear_site_login_state(page: Page, site_url: str, timeout_ms: int) -> None:
+	"""退出站点并清理其 Cookie 与浏览器存储，保留 GitHub 登录态。"""
+	site = urlparse(site_url)
+	current = urlparse(page.url)
+	if not site.hostname or (current.scheme, current.netloc) != (site.scheme, site.netloc):
+		raise ValueError('Cannot clear login state outside the provider origin')
+	try:
+		await page.context.request.get(f'{site_url}/api/user/logout', timeout=min(timeout_ms, FORM_ACTION_TIMEOUT_MS))
+	except Exception as exc:
+		debug_print(f'[INFO] Server logout unavailable; clearing local login state: {exc}')
+	await page.evaluate('() => { localStorage.clear(); sessionStorage.clear(); }')
+	await page.context.clear_cookies(domain=re.compile(rf'(^|\.){re.escape(site.hostname)}$'))
+
+
+async def _fill_github_credentials_if_needed(page: Page, username: str, password: str, timeout_ms: int) -> bool:
+	if not _is_github_url(page.url) or not username or not password:
+		return False
+	username_input = await _first_visible_locator(page, GITHUB_USERNAME_SELECTORS)
+	password_input = await _first_visible_locator(page, GITHUB_PASSWORD_SELECTORS)
+	submit = await _first_visible_locator(page, GITHUB_SUBMIT_SELECTORS)
+	if not username_input or not password_input or not submit:
+		return False
+	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
+	await _set_input_value(username_input, username, action_timeout)
+	await _set_input_value(password_input, password, action_timeout)
+	return await _click_locator(submit)
+
+
+async def _authorize_github_oauth_if_needed(page: Page) -> bool:
+	if not _is_github_url(page.url):
+		return False
+	button = await _first_visible_locator(page, GITHUB_AUTHORIZE_SELECTORS)
+	return await _click_locator(button) if button else False
+
+
+async def login_with_github_oauth(
+	page: Page,
+	username: str = '',
+	password: str = '',
+	timeout_ms: int = DEFAULT_TIMEOUT_MS,
+	*,
+	provider: str = '',
+	account_name: str = '',
+) -> Page:
+	"""点击站点的 GitHub 登录入口并完成 OAuth 回调。
+
+	如果没有提供 GitHub 用户名和密码，会复用持久化浏览器 profile 中已有的 GitHub 登录态。
+	"""
+	site = urlparse(page.url)
+	initial_pages = set(page.context.pages)
+	await _dismiss_blocking_overlays(page)
+	if not await _click_github_login_entry(page):
+		if provider and account_name:
+			await save_login_screenshot(page, provider, account_name, 'github-entry-not-found')
+		raise TimeoutError('Cannot find GitHub OAuth login entry')
+
+	deadline = time.monotonic() + timeout_ms / 1000
+	submitted_pages: set[Page] = set()
+	authorized_pages: set[Page] = set()
+	oauth_page: Page | None = None
+	while time.monotonic() < deadline:
+		for candidate in list(page.context.pages):
+			if candidate.is_closed() or (candidate is not page and candidate in initial_pages):
+				continue
+			if _is_github_url(candidate.url):
+				oauth_page = candidate
+				remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+				if candidate not in submitted_pages:
+					if await _fill_github_credentials_if_needed(candidate, username, password, remaining_ms):
+						submitted_pages.add(candidate)
+				if not candidate.is_closed() and candidate not in authorized_pages:
+					if await _authorize_github_oauth_if_needed(candidate):
+						authorized_pages.add(candidate)
+				continue
+			current = urlparse(candidate.url)
+			if (current.scheme, current.netloc) == (site.scheme, site.netloc) and await is_logged_in(candidate):
+				return candidate
+		if oauth_page is not None and oauth_page is not page and oauth_page.is_closed():
+			return page
+		await asyncio.sleep(0.5)
+	raise TimeoutError('GitHub OAuth login did not complete; check the GitHub session, credentials, or 2FA challenge')
 
 
 async def navigate_and_wait(page: Page, url: str, timeout_ms: int) -> None:

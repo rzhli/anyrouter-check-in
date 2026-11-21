@@ -7,7 +7,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router、Agent Router、GoRouter、JustDoWork，其它可根据文档进行摸索配置。
+多账号自动签到，目前只保留 Any Router 和 Agent Router 两个平台。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
@@ -32,8 +32,8 @@
 
 对于每个需要签到的账号，你需要获取：(可借助 [在线 Secrets 配置生成器](https://millylee.github.io/anyrouter-check-in/))
 
-1. **Cookies**: 用于身份验证
-2. **API User**: 用于请求头的 new-api-user 参数（自己配置其它平台时该值需要注意匹配）
+1. **Cookies**: 用于 AnyRouter 身份验证
+2. **AgentRouter 系统访问令牌**：用于读取余额；签到时还会重新执行 GitHub OAuth
 
 #### 获取 Cookies：
 
@@ -43,10 +43,6 @@
 4. 切换到 "Application" 或 "存储" 选项卡
 5. 找到 "Cookies" 选项
 6. 复制所有 cookies
-
-#### 获取 API User：
-
-按照下方图片教程操作获得。
 
 ### 3. 设置 GitHub Environment Secret
 
@@ -66,29 +62,27 @@
 [
   {
     "name": "我的主账号",
-    "email": "account1@example.com",
-    "password": "account1_password"
+    "cookies": {
+      "acw_sc__v2": "...",
+      "acw_tc": "...",
+      "cdn_sec_tc": "...",
+      "session": "..."
+    }
   },
   {
     "name": "备用账号",
     "provider": "agentrouter",
-    "email": "account2@example.com",
-    "password": "account2_password"
-  },
-  {
-    "name": "GoRouter",
-    "provider": "gorouter",
-    "access_token": "你的系统访问令牌"
+    "access_token": "AgentRouter 系统访问令牌"
   }
 ]
 ```
 
 **字段说明**：
 
-- `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
-- `cookies`：兼容旧版的 session cookies 登录方式
-- `api_user`：session cookies 登录时用于请求头的 new-api-user 参数；邮箱密码登录可省略
-- `access_token`：新版 NewAPI 站点（`gorouter`、`justwoker`）专用的系统访问令牌，配置后无需 `cookies` / `api_user` / 邮箱密码
+- `cookies`：AnyRouter 的 Cookie 字典或 Cookie 字符串；AnyRouter 不需要 `api_user`
+- `email` + `password`：AnyRouter 也可通过邮箱或用户名登录，自动获取 Cookie
+- `access_token`：AgentRouter 的系统访问令牌，放在 GitHub Secret 中
+- `github_username` + `github_password`：可选；没有时复用持久化浏览器 profile 中的 GitHub 登录态
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
 
@@ -96,64 +90,24 @@
 
 - 如果未提供 `provider` 字段，默认使用 `anyrouter`（向后兼容）
 - 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称
-- `anyrouter`、`agentrouter`、`gorouter`、`justwoker` 配置已内置，无需填写
+- 仅 `anyrouter` 和 `agentrouter` 有内置配置；其它 provider 会被忽略
 
-### 4.1 新版 NewAPI 站点（GoRouter / JustDoWork）
+### 4.1 AgentRouter 登录签到
 
-新版 NewAPI（`v1.0.0-rc` 起）改用 `Authorization: Bearer` 鉴权，`session` cookie 与 `new-api-user` 请求头都已失效，且签到接口带 Cloudflare Turnstile 校验。这类站点走 `flow: "newapi_v2"` 流程，只需要一个长期有效的系统访问令牌。
+AgentRouter 没有独立的签到接口，网页签到的实际流程是：先退出当前会话，再使用 GitHub OAuth 登录。脚本会请求退出接口、清理 AgentRouter 的 Cookie 和浏览器存储，保留 GitHub 的登录态，然后执行这套流程。当前页和 OAuth 弹窗均受支持，登录后会通过 `/api/user/self` 验证会话。
 
-获取令牌：登录站点 → 右上角头像 → **个人设置** → **安全** → **系统访问令牌（Access Token）** → 生成并复制。
+系统访问令牌只用于请求 `/api/user/self`，不能替代 GitHub 登录。请放在 `ANYROUTER_ACCOUNTS` Secret 中，不要提交到仓库。
 
-配置示例：
+首次使用时，在本地设置 `CHECKIN_HEADLESS=false`，必要时增大 `CHECKIN_WAIT_TIMEOUT_MS`，在打开的浏览器中完成 GitHub 登录、授权和二次验证，之后可复用同一个账号名称对应的 `.browser_profiles/agentrouter/` profile。也可配置 `github_username` 和 `github_password` 自动填写登录表单；遇到二次验证仍需人工完成，超时会明确报告失败。
 
-```json
-[
-  {
-    "name": "GoRouter",
-    "provider": "gorouter",
-    "access_token": "你在 GoRouter 生成的令牌"
-  },
-  {
-    "name": "JustDoWork",
-    "provider": "justwoker",
-    "access_token": "你在 JustDoWork 生成的令牌"
-  }
-]
-```
+GitHub Actions 的运行环境不会自动获得本地 profile。无人值守运行需要该环境已有可复用的 GitHub 登录态，或可完成登录的凭据；仅配置系统访问令牌不足以完成签到。浏览器 profile 含敏感会话信息，请勿提交或公开分享。
 
-签到流程（HTTP 直连，适用 `justwoker` 等未被 Cloudflare 拦截的站点）：
+### 4.2 AnyRouter Cookie
 
-1. 用令牌请求 `/api/user/self` 读取签到前余额
-2. 请求 `/api/user/checkin?month=YYYY-MM` 判断今日是否已签到；已签到则直接结束，**不启动浏览器**
-3. 未签到时启动 CloakBrowser 打开 `/sign-in`，从 Turnstile widget 取回 token
-4. 带 token 请求 `POST /api/user/checkin?turnstile=<token>` 完成签到，再读一次余额算差额
-
-**浏览器点击签到（适用 `gorouter` 等整站被 Cloudflare 拦截的站点）**：
-
-`gorouter.app` 整站都套了 Cloudflare，上面的 HTTP 直连流程会被 `Sorry, you have been blocked` 拦截。这类站点改用浏览器点击签到：
-
-1. 启动 CloakBrowser 打开站点，通过 Cloudflare 挑战（拿到通行 cookie）
-2. 把访问令牌写入前端 `localStorage`，让 SPA 视为已登录
-3. 打开 `/profile`，读取签到前余额并判断今日是否已签到
-4. 点击“签到”按钮，由浏览器自动通过 Turnstile 并提交 `POST /api/user/checkin`
-5. 读取签到后余额，计算差额
-
-注意事项：
-
-- 必须使用 CloakBrowser 自带的 Chromium。Playwright 自带的 Chromium 中 `navigator.webdriver` 恒为 `true`、UA 含 `HeadlessChrome`，Turnstile 不会签发 token（实测无法通过）
-- 浏览器点击签到通过持久化浏览器 profile 复用 Cloudflare 通行 cookie，`CHECKIN_BROWSER_PROFILE_DIR` 可自定义存放目录
-- 两类站点无需 xvfb，`CHECKIN_HEADLESS=true` 即可
-- 令牌等价于账号长期凭证，只放进 GitHub Secrets，不要提交到仓库或明文分享；泄露后到同一页面重新生成即可失效旧令牌
-
-如果使用 session cookies 登录，接下来获取 cookies 与 api_user 的值。
-
-通过 F12 工具，切到 Application 面板，拿到 session 的值，最好重新登录下，该值 1 个月有效期，但有可能提前失效，失效后报 401 错误，到时请再重新获取。
+AnyRouter 账号不需要 `user_id` 或 `api_user`。Cookie 中填写 `acw_sc__v2`、`acw_tc`、`cdn_sec_tc` 和 `session` 四项即可。
 
 ![获取 cookies](./assets/request-session.png)
 
-通过 F12 工具，切到 Network 面板，可以过滤下，只要 Fetch/XHR，找到带 `New-Api-User`，这个值正常是 5 位数，如果是负数或者个位数，正常是未登录。
-
-![获取 api_user](./assets/request-api-user.png)
 
 ### 5. 启用 GitHub Actions
 
@@ -179,7 +133,7 @@
 
 ## 注意事项
 
-- 请确保每个账号的 cookies 和 API User 都是正确的
+- 请确保 AnyRouter 的四项 Cookie 有效；AgentRouter 的系统访问令牌和 GitHub 登录态有效
 - 可以在 Actions 页面查看详细的运行日志
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
@@ -189,21 +143,17 @@
 
 ### 基础配置（向后兼容）
 
-假设你有两个账号需要签到，不指定 provider 时默认使用 anyrouter：
+AnyRouter 不需要 `api_user`，直接填写四项 Cookie：
 
 ```json
 [
   {
     "cookies": {
-      "session": "abc123session"
-    },
-    "api_user": "user123"
-  },
-  {
-    "cookies": {
-      "session": "xyz789session"
-    },
-    "api_user": "user456"
+      "acw_sc__v2": "...",
+      "acw_tc": "...",
+      "cdn_sec_tc": "...",
+      "session": "..."
+    }
   }
 ]
 ```
@@ -218,122 +168,35 @@
     "name": "AnyRouter 主账号",
     "provider": "anyrouter",
     "cookies": {
-      "session": "abc123session"
-    },
-    "api_user": "user123"
+      "acw_sc__v2": "...",
+      "acw_tc": "...",
+      "cdn_sec_tc": "...",
+      "session": "..."
+    }
   },
   {
     "name": "AgentRouter 备用",
     "provider": "agentrouter",
-    "cookies": {
-      "session": "xyz789session"
-    },
-    "api_user": "user456"
+    "access_token": "AgentRouter 系统访问令牌"
   }
 ]
 ```
 
-### 新版 NewAPI 站点配置（access_token）
+## Provider 配置
 
-内置的 `gorouter`、`justwoker` 使用新版 NewAPI 流程，与旧站点可以混编在同一份配置里：
+脚本只接受内置的 `anyrouter` 和 `agentrouter`。`PROVIDERS` 只用于覆盖这两个 provider 的设置，其他站点会被忽略。
 
-```json
-[
-  {
-    "name": "AnyRouter 主账号",
-    "provider": "anyrouter",
-    "email": "account1@example.com",
-    "password": "account1_password"
-  },
-  {
-    "name": "GoRouter",
-    "provider": "gorouter",
-    "access_token": "gorouter_令牌"
-  },
-  {
-    "name": "JustDoWork",
-    "provider": "justwoker",
-    "access_token": "justwoker_令牌"
-  }
-]
-```
-
-## 自定义 Provider 配置（可选）
-
-默认情况下，`anyrouter`、`agentrouter`、`gorouter`、`justwoker` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
-
-### 基础配置（仅域名）
-
-大多数情况下，只需提供 `domain` 即可，其他路径会自动使用默认值：
+可按需覆盖域名、代理和 GitHub OAuth 开关等设置：
 
 ```json
 {
-  "customrouter": {
-    "domain": "https://custom.example.com"
+  "agentrouter": {
+    "domain": "https://agentrouter.org",
+    "use_proxy": true,
+    "github_oauth": true
   }
 }
 ```
-
-### 完整配置（自定义路径）
-
-如果服务商使用了不同的 API 路径、请求头或需要 WAF 绕过，可以额外指定：
-
-```json
-{
-  "customrouter": {
-    "domain": "https://custom.example.com",
-    "login_path": "/auth/login",
-    "sign_in_path": "/api/checkin",
-    "user_info_path": "/api/profile",
-    "api_user_key": "New-Api-User",
-    "bypass_method": "waf_cookies",
-    "waf_cookie_names": ["acw_tc", "cdn_sec_tc", "acw_sc__v2"]
-  }
-}
-```
-
-**关于 `bypass_method`**：
-
-- 不设置或设置为 `null`：直接使用用户提供的 cookies 进行请求（适合无 WAF 保护的网站）
-- 设置为 `"waf_cookies"`：使用 CloakBrowser 打开浏览器获取 WAF cookies 后再进行请求（适合有 WAF 保护的网站）
-
-### 新版 NewAPI 站点（flow: newapi_v2）
-
-如果目标站点是新版 NewAPI（登录页在 `/sign-in`、签到接口是 `/api/user/checkin`），改用 `flow` 字段：
-
-```json
-{
-  "mysite": {
-    "domain": "https://my.example.com",
-    "flow": "newapi_v2",
-    "login_path": "/sign-in",
-    "sign_in_path": "/api/user/checkin",
-    "checkin_status_path": "/api/user/checkin",
-    "quota_per_unit": 500000
-  }
-}
-```
-
-如果这类站点整站被 Cloudflare 拦截（`curl https://站点域名/api/status` 返回 `Sorry, you have been blocked`），HTTP 直连会失效，需开启浏览器点击签到，补上 `browser_click_check_in` 字段：
-
-```json
-{
-  "mysite": {
-    "domain": "https://my.example.com",
-    "flow": "newapi_v2",
-    "login_path": "/sign-in",
-    "sign_in_path": "/api/user/checkin",
-    "checkin_status_path": "/api/user/checkin",
-    "browser_click_check_in": true,
-    "checkin_page_path": "/profile",
-    "token_storage_key": "token"
-  }
-}
-```
-
-可以访问 `https://站点域名/api/status` 确认是否属于这类站点：返回体里包含 `checkin_enabled`、`turnstile_check`、`quota_per_unit` 则是。
-
-> 注：`anyrouter`、`agentrouter`、`gorouter`、`justwoker` 已内置默认配置，无需在 `PROVIDERS` 中配置
 
 ### 在 GitHub Actions 中配置
 
@@ -344,38 +207,16 @@
 
 **字段说明**：
 
-- `domain` (必需)：服务商的域名
+- `domain` (可选)：覆盖内置 provider 的域名
 - `login_path` (可选)：登录页面路径，默认为 `/login`（仅在 `bypass_method` 为 `"waf_cookies"` 时使用）
 - `sign_in_path` (可选)：签到 API 路径，默认为 `/api/user/sign_in`
 - `user_info_path` (可选)：用户信息 API 路径，默认为 `/api/user/self`
-- `api_user_key` (可选)：API 用户标识请求头名称，默认为 `new-api-user`
 - `bypass_method` (可选)：WAF 绕过方法
   - `"waf_cookies"`：使用 CloakBrowser 打开浏览器获取 WAF cookies 后再执行签到
   - 不设置或 `null`：直接使用用户 cookies 执行签到（适合无 WAF 保护的网站）
 - `waf_cookie_names` (可选)：绕过 WAF 所需 cookie 的名称列表，`bypass_method` 为 `waf_cookies` 时必须设置
-- `flow` (可选)：签到流程类型，`"legacy"`（默认，session cookie + `new-api-user`）或 `"newapi_v2"`（Bearer 访问令牌 + Turnstile）
-- `checkin_status_path` (可选)：`newapi_v2` 专用，签到状态查询接口，设置后已签到就不再启动浏览器
-- `quota_per_unit` (可选)：额度换算单位，默认 `500000`
-- `browser_click_check_in` (可选)：`newapi_v2` 专用，站点被 Cloudflare 拦截时设为 `true`，改用浏览器打开签到页并点击签到按钮完成签到
-- `checkin_page_path` (可选)：浏览器点击签到时打开的页面，默认 `/profile`
-- `checkin_button_selector` (可选)：签到按钮的 CSS 选择器（优先于文本匹配）
-- `checkin_button_text` (可选)：签到按钮的可见文本（可用于精确匹配）
-- `token_storage_key` (可选)：把访问令牌写入 SPA 的 `localStorage` 键名，默认 `token`
 
-**配置示例**（完整）：
-
-```json
-{
-  "customrouter": {
-    "domain": "https://custom.example.com",
-    "login_path": "/auth/login",
-    "sign_in_path": "/api/checkin",
-    "user_info_path": "/api/profile",
-    "api_user_key": "x-user-id",
-    "bypass_method": "waf_cookies"
-  }
-}
-```
+- `github_oauth` (可选)：AgentRouter 使用 GitHub OAuth 触发签到，默认 `true`
 
 **内置配置说明**：
 
@@ -384,17 +225,13 @@
   - `sign_in_path: "/api/user/sign_in"`
 - `agentrouter`：
   - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
-  - `sign_in_path: null`（查询用户信息时自动签到）
+  - `sign_in_path: null`（无独立签到 API，通过重新登录触发签到）
   - `use_proxy: true`
-- `gorouter`、`justwoker`：
-  - `flow: "newapi_v2"`（Bearer 访问令牌 + Turnstile，需要账号配置 `access_token`）
-  - `login_path: "/sign-in"`、`sign_in_path: "/api/user/checkin"`
-  - `bypass_method: null`（不需要 WAF cookies）
-  - `gorouter` 额外开启 `browser_click_check_in: true`（整站被 Cloudflare 拦截，需浏览器点击签到）；`justwoker` 保持 HTTP 直连流程
+  - `github_oauth: true`（先登出，再用 GitHub OAuth 登录触发签到）
 
 **重要提示**：
 
-- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`agentrouter`、`gorouter`、`justwoker`
+- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`agentrouter`
 - 自定义的 provider 配置会覆盖同名的默认配置
 
 ## 代理配置（可选）
@@ -474,7 +311,7 @@ PROVIDERS={"agentrouter":{"use_proxy":true}}
 
 1. 账号配置格式是否正确
 2. cookies 是否过期
-3. API User 是否正确
+3. AgentRouter 的 GitHub profile 是否已登录
 4. 网站是否更改了签到接口
 5. 查看 Actions 运行日志获取详细错误信息
 
