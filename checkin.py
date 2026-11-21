@@ -279,6 +279,20 @@ def parse_user_info_payload(payload, quota_per_unit: int = 500000) -> dict:
 	return {'success': False, 'error': payload.get('message') or payload.get('msg') or 'Unknown error'}
 
 
+def describe_invalid_json_response(response) -> str:
+	"""报告响应类型，不输出可能包含会话信息的响应正文。"""
+	content_type = str(getattr(response, 'headers', {}).get('content-type', '')).lower()
+	body_start = response.text.lstrip().lower()
+	is_html = 'text/html' in content_type or body_start.startswith(
+		('<!doctype html', '<html', '<head', '<body', '<script')
+	)
+	response_type = 'HTML' if is_html else 'non-JSON'
+	return (
+		f'Expected JSON but received {response_type} (HTTP {response.status_code}); '
+		'check WAF/verification pages, login redirects, and cookie validity'
+	)
+
+
 def get_user_info(client, headers, user_info_url: str, quota_per_unit: int = 500000):
 	"""获取用户信息"""
 	try:
@@ -288,7 +302,7 @@ def get_user_info(client, headers, user_info_url: str, quota_per_unit: int = 500
 			try:
 				payload = response.json()
 			except json.JSONDecodeError:
-				return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
+				return {'success': False, 'error': describe_invalid_json_response(response)}
 			return parse_user_info_payload(payload, quota_per_unit)
 		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
 	except Exception as e:
@@ -313,7 +327,7 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 	else:
 		print(f'[INFO] {account_name}: Bypass WAF not required, using user cookies directly')
 
-	return {**waf_cookies, **user_cookies}
+	return {**user_cookies, **waf_cookies}
 
 
 ALREADY_CHECKED_KEYWORDS = (
@@ -360,11 +374,11 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 				print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
 				return False
 		except json.JSONDecodeError:
-			if 'success' in response.text.lower():
+			if response.text.strip().lower() == 'success':
 				print(f'[SUCCESS] {account_name}: Check-in successful!')
 				return True
 			else:
-				print(f'[FAILED] {account_name}: Check-in failed - Invalid response format')
+				print(f'[FAILED] {account_name}: Check-in failed - {describe_invalid_json_response(response)}')
 				return False
 	else:
 		print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')

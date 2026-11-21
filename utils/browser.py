@@ -93,6 +93,16 @@ EMAIL_TAB_TIMEOUT_MS = 8_000
 WAF_READY_TIMEOUT_MS = 30_000
 SESSION_WAIT_TIMEOUT_MS = 45_000
 
+
+class InteractiveVerificationRequiredError(RuntimeError):
+	"""站点要求无人值守环境无法完成的人工验证。"""
+
+
+_INTERACTIVE_VERIFICATION_JS = r"""() => {
+	const text = document.body?.innerText || '';
+	return /please\s+slide\s+to|slide\s+to\s+verify|请(?:滑动|拖动).*验证|请.*滑块.*验证/i.test(text);
+}"""
+
 _VISIBLE_CHECK_JS = """
 	const isVisible = (el) => {
 		if (!el || !el.isConnected) return false;
@@ -109,7 +119,7 @@ _VISIBLE_CHECK_JS = """
 _SITE_READY_JS = f"""() => {{
 {_VISIBLE_CHECK_JS}
 	const text = document.body?.innerText || '';
-	const blocked = /请进行验证|为了更好的访问体验|访问受限|Access denied|verify you are human/i.test(text);
+	const blocked = /请进行验证|为了更好的访问体验|访问受限|Access denied|verify you are human|please slide to|slide to verify/i.test(text);
 	if (blocked) return false;
 	const wafBlockers = document.querySelector(
 		'iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="slide"], .nc-container, #nocaptcha'
@@ -127,7 +137,7 @@ _SITE_READY_JS = f"""() => {{
 _LOGIN_SHELL_READY_JS = f"""() => {{
 {_VISIBLE_CHECK_JS}
 	const text = document.body?.innerText || '';
-	const blocked = /请进行验证|为了更好的访问体验|访问受限|Access denied|verify you are human/i.test(text);
+	const blocked = /请进行验证|为了更好的访问体验|访问受限|Access denied|verify you are human|please slide to|slide to verify/i.test(text);
 	if (blocked) return false;
 	return countVisible('.semi-card') > 0 || countVisible('#username') > 0 || countVisible('button') >= 2;
 }}"""
@@ -321,14 +331,34 @@ async def prepare_browser_page(page: Page) -> None:
 	await setup_popup_guard(page)
 
 
+async def raise_if_interactive_verification_required(page: Page) -> None:
+	"""无人值守或无界面运行时明确报告滑块验证；本地有界面模式允许人工处理。"""
+	if not _env_bool('GITHUB_ACTIONS', False) and not _env_bool('CHECKIN_HEADLESS', True):
+		return
+	try:
+		required = await page.evaluate(_INTERACTIVE_VERIFICATION_JS)
+	except Exception as exc:
+		debug_print(f'[INFO] Could not inspect verification state: {exc}')
+		return
+	if required is True:
+		raise InteractiveVerificationRequiredError(
+			'Site requires interactive slide verification before login; it cannot be completed unattended. '
+			'Use a working proxy (PROXY_SUBSCRIPTION_URL in Actions, CHECKIN_PROXY_URL locally), '
+			'or complete verification in a local browser with CHECKIN_HEADLESS=false. '
+			'A proxy may help but does not guarantee removal of the challenge.'
+		)
+
+
 async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:
 	"""等待 WAF 通过并关闭弹窗。"""
 	waf_timeout = min(timeout_ms, WAF_READY_TIMEOUT_MS)
 	await page.wait_for_load_state('domcontentloaded', timeout=waf_timeout)
+	await raise_if_interactive_verification_required(page)
 	try:
 		await page.wait_for_function(_SITE_READY_JS, timeout=waf_timeout)
 	except Exception:
 		await asyncio.sleep(3)
+	await raise_if_interactive_verification_required(page)
 	closed = await dismiss_popups(page)
 	if closed:
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
@@ -376,9 +406,12 @@ async def navigate_login_page(
 		print(f'[INFO] Warming up {base_url} before login')
 		await page.goto(base_url, wait_until='load', timeout=attempt_timeout)
 		await _settle_page(page, 3, 15_000)
+		await raise_if_interactive_verification_required(page)
 		closed = await dismiss_popups(page)
 		if closed:
 			print(f'[INFO] Dismissed {closed} popup dialog(s) during warmup')
+	except InteractiveVerificationRequiredError:
+		raise
 	except Exception as exc:
 		print(f'[WARN] Warmup navigation failed: {exc}')
 
@@ -386,12 +419,14 @@ async def navigate_login_page(
 		print(f'[INFO] Navigating login page (attempt {attempt + 1}/3): {login_url}')
 		await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
 		await _settle_page(page, 5, 20_000)
+		await raise_if_interactive_verification_required(page)
 
 		if await _wait_for_login_shell(page, attempt_timeout):
 			await wait_for_site_ready(page, timeout_ms)
 			if await page.evaluate(_LOGIN_SHELL_READY_JS):
 				return
 
+		await raise_if_interactive_verification_required(page)
 		print(f'[WARN] Login page shell not ready on attempt {attempt + 1}')
 		await _log_login_page_state(page)
 		if provider and account_name:

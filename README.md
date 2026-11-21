@@ -102,9 +102,13 @@ AgentRouter 没有独立的签到接口，网页签到的实际流程是：先�
 
 GitHub Actions 的运行环境不会自动获得本地 profile。无人值守运行需要该环境已有可复用的 GitHub 登录态，或可完成登录的凭据；仅配置系统访问令牌不足以完成签到。浏览器 profile 含敏感会话信息，请勿提交或公开分享。
 
+若日志出现 `Access Verification` / `Please slide to verify`，说明请求在到达 GitHub 登录前就被站点的滑块验证拦截，并不是缺少用户 ID 或系统访问令牌。Actions 的 Xvfb 只是虚拟显示器，无法人工完成验证；脚本会明确报告该问题，不再重复等待登录页。可尝试配置 `PROXY_SUBSCRIPTION_URL` 使用可访问站点的代理出口，但代理不能保证消除验证。本地可用 `CHECKIN_HEADLESS=false` 在浏览器中人工完成验证。
+
 ### 4.2 AnyRouter Cookie
 
 AnyRouter 账号不需要 `user_id` 或 `api_user`。Cookie 中填写 `acw_sc__v2`、`acw_tc`、`cdn_sec_tc` 和 `session` 四项即可。
+
+每次运行会重新获取 WAF Cookie，以浏览器获取的新值覆盖配置中的同名旧值，同时保留账号的 `session`。HTTP 200 不代表签到成功；如果响应是 HTML 验证页或登录重定向而不是 JSON，脚本会报告响应类型，需检查站点验证、代理出口及 Cookie 有效性。
 
 ![获取 cookies](./assets/request-session.png)
 
