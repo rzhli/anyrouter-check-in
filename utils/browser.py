@@ -45,6 +45,20 @@ GITHUB_AUTHORIZE_SELECTORS = (
 	'input[type="submit"][name="authorize"]',
 	'button:has-text("Authorize")',
 )
+_GITHUB_AUTH_STATE_JS = """() => {
+	const visible = (selector) => [...document.querySelectorAll(selector)].some(element => {
+		const bounds = element.getBoundingClientRect();
+		const style = getComputedStyle(element);
+		return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+	});
+	if (visible('input[autocomplete="one-time-code"], input[name="otp"], #otp, input[name="sudo_otp"]')) {
+		return 'verification-required';
+	}
+	if (visible('#login_field, input[name="login"]') && visible('#password, input[name="password"]')) {
+		return visible('.flash-error, .js-flash-alert[role="alert"]') ? 'login-error' : 'login-form';
+	}
+	return 'unknown';
+}"""
 EMAIL_LOGIN_ENTRY_SELECTORS = (
 	'.semi-card button:has(.semi-icon-mail):not(form.semi-form button)',
 	'.semi-card button:has([aria-label="mail"]):not(form.semi-form button)',
@@ -225,7 +239,7 @@ def load_browser_login_settings(
 		wait_timeout_ms=int(os.getenv('CHECKIN_WAIT_TIMEOUT_MS', str(DEFAULT_TIMEOUT_MS))),
 		profile_dir=profile_dir,
 		cloakbrowser_binary_path=os.getenv('CLOAKBROWSER_BINARY_PATH', '').strip() or None,
-		persist_profile=persist_profile,
+		persist_profile=persist_profile and not _env_bool('GITHUB_ACTIONS', False),
 	)
 
 
@@ -976,6 +990,45 @@ async def _authorize_github_oauth_if_needed(page: Page) -> bool:
 	return await _click_locator(button) if button else False
 
 
+async def _inspect_github_auth_state(page: Page) -> str:
+	"""只检查 GitHub 页面状态，不读取输入值或错误正文。"""
+	if not _is_github_url(page.url):
+		return 'unknown'
+	path = urlparse(page.url).path
+	if path.startswith(('/sessions/two-factor', '/sessions/verified-device', '/login/device')):
+		return 'verification-required'
+	try:
+		state = await page.evaluate(_GITHUB_AUTH_STATE_JS)
+	except Exception:
+		return 'unknown'
+	return state if state in ('login-form', 'login-error', 'verification-required') else 'unknown'
+
+
+async def _save_github_oauth_diagnostics(
+	page: Page,
+	initial_pages: set[Page],
+	provider: str,
+	account_name: str,
+	*,
+	github_seen: bool,
+	credentials_submitted: bool,
+	authorization_submitted: bool,
+) -> None:
+	print(
+		f'[INFO] {account_name}: OAuth progress: github_seen={github_seen}, '
+		f'credentials_submitted={credentials_submitted}, authorization_submitted={authorization_submitted}'
+	)
+	for index, candidate in enumerate(list(page.context.pages)):
+		if candidate.is_closed() or (candidate is not page and candidate in initial_pages):
+			continue
+		parsed = urlparse(candidate.url)
+		location = f'{parsed.scheme}://{parsed.hostname}{parsed.path}' if parsed.hostname else f'{parsed.scheme}:'
+		state = await _inspect_github_auth_state(candidate)
+		print(f'[INFO] {account_name}: OAuth window {index}: {location}, state={state}')
+		if provider and account_name:
+			await save_login_screenshot(candidate, provider, account_name, f'github-oauth-window-{index}-{state}')
+
+
 async def login_with_github_oauth(
 	page: Page,
 	username: str = '',
@@ -998,6 +1051,7 @@ async def login_with_github_oauth(
 		raise TimeoutError('Cannot find GitHub OAuth login entry')
 
 	deadline = time.monotonic() + timeout_ms / 1000
+	unattended = _env_bool('GITHUB_ACTIONS', False) or _env_bool('CHECKIN_HEADLESS', True)
 	submitted_pages: set[Page] = set()
 	authorized_pages: set[Page] = set()
 	oauth_page: Page | None = None
@@ -1007,13 +1061,41 @@ async def login_with_github_oauth(
 				continue
 			if _is_github_url(candidate.url):
 				oauth_page = candidate
+				state = await _inspect_github_auth_state(candidate)
+				error = None
+				if unattended and state == 'verification-required':
+					error = 'GitHub requires 2FA or device verification; complete it in an interactive browser'
+				elif unattended and state == 'login-error':
+					error = (
+						'GitHub login returned an error; check the GitHub credentials and account security requirements'
+					)
+				elif unattended and state == 'login-form' and (not username or not password):
+					error = (
+						'GitHub is not logged in and credentials are missing; import or refresh GITHUB_SESSION_STATE '
+						'using scripts/github_session.py, or configure github_username and github_password '
+						'inside the AgentRouter entry of ANYROUTER_ACCOUNTS. '
+						'The AgentRouter access_token cannot log in to GitHub'
+					)
+				if error:
+					await _save_github_oauth_diagnostics(
+						page,
+						initial_pages,
+						provider,
+						account_name,
+						github_seen=True,
+						credentials_submitted=bool(submitted_pages),
+						authorization_submitted=bool(authorized_pages),
+					)
+					raise TimeoutError(error)
 				remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
 				if candidate not in submitted_pages:
 					if await _fill_github_credentials_if_needed(candidate, username, password, remaining_ms):
 						submitted_pages.add(candidate)
+						print(f'[INFO] {account_name}: GitHub login form submitted')
 				if not candidate.is_closed() and candidate not in authorized_pages:
 					if await _authorize_github_oauth_if_needed(candidate):
 						authorized_pages.add(candidate)
+						print(f'[INFO] {account_name}: GitHub OAuth authorization submitted')
 				continue
 			current = urlparse(candidate.url)
 			if (current.scheme, current.netloc) == (site.scheme, site.netloc) and await is_logged_in(candidate):
@@ -1021,6 +1103,15 @@ async def login_with_github_oauth(
 		if oauth_page is not None and oauth_page is not page and oauth_page.is_closed():
 			return page
 		await asyncio.sleep(0.5)
+	await _save_github_oauth_diagnostics(
+		page,
+		initial_pages,
+		provider,
+		account_name,
+		github_seen=oauth_page is not None,
+		credentials_submitted=bool(submitted_pages),
+		authorization_submitted=bool(authorized_pages),
+	)
 	raise TimeoutError('GitHub OAuth login did not complete; check the GitHub session, credentials, or 2FA challenge')
 
 

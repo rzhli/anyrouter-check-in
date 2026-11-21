@@ -82,6 +82,7 @@
 - `cookies`：AnyRouter 的 Cookie 字典或 Cookie 字符串；AnyRouter 不需要 `api_user`
 - `email` + `password`：AnyRouter 也可通过邮箱或用户名登录，自动获取 Cookie
 - `access_token`：AgentRouter 的系统访问令牌，放在 GitHub Secret 中
+- `GITHUB_SESSION_STATE`：独立的可选 Environment Secret；由本地工具导出已完成 2FA 的 GitHub 会话，按账号 `name` 匹配
 - `github_username` + `github_password`：可选；没有时复用持久化浏览器 profile 中的 GitHub 登录态
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
@@ -100,9 +101,32 @@ AgentRouter 没有独立的签到接口，网页签到的实际流程是：先�
 
 首次使用时，在本地设置 `CHECKIN_HEADLESS=false`，必要时增大 `CHECKIN_WAIT_TIMEOUT_MS`，在打开的浏览器中完成 GitHub 登录、授权和二次验证，之后可复用同一个账号名称对应的 `.browser_profiles/agentrouter/` profile。也可配置 `github_username` 和 `github_password` 自动填写登录表单；遇到二次验证仍需人工完成，超时会明确报告失败。
 
-GitHub Actions 的运行环境不会自动获得本地 profile。无人值守运行需要该环境已有可复用的 GitHub 登录态，或可完成登录的凭据；仅配置系统访问令牌不足以完成签到。浏览器 profile 含敏感会话信息，请勿提交或公开分享。
+GitHub Actions 的运行环境不会自动获得本地 profile。启用 2FA 时，推荐使用下方本地工具完成一次人工认证，再导入 `GITHUB_SESSION_STATE`。仅配置系统访问令牌不足以完成签到。Actions 使用临时浏览器，不保存或恢复包含登录凭据的 profile 缓存；本地正常签到仍可复用持久化 profile。
+
+`github_username` 和 `github_password` 放在 `ANYROUTER_ACCOUNTS` 的 AgentRouter 对象内，不是单独的 Actions Secret。已有可用的 GitHub 登录态时可以省略。遇到登录表单缺少凭据、GitHub 登录错误或二次验证时，脚本会给出针对性提示；调试模式会保存 OAuth 新窗口的截图，日志中的页面地址不包含查询参数和片段。截图可能包含账号信息，请勿公开分享。
 
 若日志出现 `Access Verification` / `Please slide to verify`，说明请求在到达 GitHub 登录前就被站点的滑块验证拦截，并不是缺少用户 ID 或系统访问令牌。Actions 的 Xvfb 只是虚拟显示器，无法人工完成验证；脚本会明确报告该问题，不再重复等待登录页。可尝试配置 `PROXY_SUBSCRIPTION_URL` 使用可访问站点的代理出口，但代理不能保证消除验证。本地可用 `CHECKIN_HEADLESS=false` 在浏览器中人工完成验证。
+
+#### 保留 2FA：本地认证后导入 Actions
+
+1. 在本地桌面环境安装项目依赖和 CloakBrowser，安装 GitHub CLI（`gh`），通过 `gh auth login` 登录有权管理该仓库 Secrets 的账号。GitHub CLI 的认证用于上传 Secret，和浏览器中登录 AgentRouter 的 GitHub 账号是两件事。
+2. 确认仓库已有 `production` Environment，`ANYROUTER_ACCOUNTS` 中 AgentRouter 的 `name` 是 `AgentRouter`。若使用其他名称，修改下方的 `--account-name`。
+3. 在项目目录运行：
+
+```bash
+uv sync --frozen
+uv run python -m cloakbrowser install
+uv run python scripts/github_session.py --account-name AgentRouter --repo rzhli/anyrouter-check-in
+```
+
+4. 在新打开的本地浏览器中，用绑定 AgentRouter 的 GitHub 账号完成用户名、密码、六位验证码和必要的设备验证。完成后回到终端按 Enter。工具会访问 GitHub 的个人设置页确认已登录，只导出 `github.com` Cookie，并通过 `gh` 的标准 Secret 加密上传流程更新 `production` 的 `GITHUB_SESSION_STATE`。密码、验证码、2FA 密钥和浏览器 profile 均不导出；导出的 JSON 通过标准输入提交，不生成会话文件，也不出现在命令参数或终端输出中。
+5. 重新运行 Actions。脚本按账号名称导入会话，退出时仅清理 AgentRouter 登录态，保留 GitHub Cookie；因此通常可直接完成 OAuth，无需在 Actions 中输入六位验证码。`ANYROUTER_ACCOUNTS` 中可以省略 `github_username` 和 `github_password`。
+
+本地工具默认直连；需要代理时先设置 `CHECKIN_PROXY_URL`，再添加 `--use-proxy`。`--environment` 可覆盖默认的 `production`。多个 AgentRouter 账号可重复传入 `--account-name`，每个账号都会打开独立浏览器供你登录；一次上传替换整个 Secret，因此应同时导出所有需要的账号。
+
+若不能直接上传，可使用 `--output .session_exports/github-session.json` 代替 `--repo`，再将文件全部内容粘贴到 `production` 的 `GITHUB_SESSION_STATE` Secret。文件权限为 `0600`，目录已加入 `.gitignore`，已存在的文件不会被覆盖。它是明文登录凭证，导入后请删除，不要发送到聊天、提交到仓库或上传为 artifact。
+
+**会话不是永久有效，也不能绕过 GitHub 的安全策略。** 会话过期、退出、撤销或换出口后被要求重新验证时，需要再次运行工具更新 Secret；不要关闭 2FA，也不要把六位验证码或 2FA 密钥配置到 Actions。会话与密码一样敏感，应仅允许可信维护者修改使用该 Secret 的 workflow。若旧版本已生成 `browser-profiles-*` 缓存，请在 Actions → Caches 中删除这些缓存；移除缓存步骤不会自动删除历史缓存。
 
 ### 4.2 AnyRouter Cookie
 

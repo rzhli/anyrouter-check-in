@@ -25,6 +25,7 @@ def oauth_page(monkeypatch):
 	page.fill_credentials = AsyncMock(return_value=False)
 	monkeypatch.setattr(browser, '_fill_github_credentials_if_needed', page.fill_credentials)
 	monkeypatch.setattr(browser, '_authorize_github_oauth_if_needed', AsyncMock(return_value=False))
+	monkeypatch.setattr(browser, '_inspect_github_auth_state', AsyncMock(return_value='unknown'))
 	monkeypatch.setattr(browser.asyncio, 'sleep', AsyncMock())
 	return page
 
@@ -170,6 +171,111 @@ async def test_github_login_form_is_filled_and_submitted(monkeypatch):
 	assert set_value.await_args_list[0].args == (username_input, 'test-user', 100)
 	assert set_value.await_args_list[1].args == (password_input, 'test-password', 100)
 	click.assert_awaited_once_with(submit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+	'state, username, password, message',
+	[
+		('login-form', '', '', 'credentials are missing'),
+		('login-form', 'test-user', '', 'credentials are missing'),
+		('verification-required', 'test-user', 'test-password', '2FA or device verification'),
+		('login-error', 'test-user', 'test-password', 'GitHub login returned an error'),
+	],
+)
+async def test_unattended_github_login_reports_specific_failure(
+	monkeypatch, oauth_page, state, username, password, message
+):
+	monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+	monkeypatch.setenv('CHECKIN_HEADLESS', 'false')
+	popup = make_page('https://github.com/login?return_to=private-oauth-state')
+	inspect_state = AsyncMock(return_value=state)
+	screenshot = AsyncMock()
+
+	async def click_entry(page):
+		page.context.pages.append(popup)
+		return True
+
+	monkeypatch.setattr(browser, '_click_github_login_entry', click_entry)
+	monkeypatch.setattr(browser, '_inspect_github_auth_state', inspect_state)
+	monkeypatch.setattr(browser, 'save_login_screenshot', screenshot)
+
+	with pytest.raises(TimeoutError, match=message):
+		await browser.login_with_github_oauth(
+			oauth_page, username, password, provider='agentrouter', account_name='Test'
+		)
+
+	assert any(call.args[0] is popup for call in screenshot.await_args_list)
+	oauth_page.fill_credentials.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_local_headed_github_login_allows_manual_verification(monkeypatch, oauth_page):
+	monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+	monkeypatch.setenv('CHECKIN_HEADLESS', 'false')
+	monkeypatch.setattr(browser, '_inspect_github_auth_state', AsyncMock(return_value='verification-required'))
+
+	async def click_entry(page):
+		page.url = 'https://github.com/sessions/two-factor'
+		return True
+
+	async def manual_login(delay):
+		oauth_page.url = 'https://agentrouter.org/console'
+
+	monkeypatch.setattr(browser, '_click_github_login_entry', click_entry)
+	monkeypatch.setattr(browser.asyncio, 'sleep', AsyncMock(side_effect=manual_login))
+
+	assert await browser.login_with_github_oauth(oauth_page) is oauth_page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('path', ['/sessions/two-factor', '/sessions/verified-device', '/login/device'])
+async def test_github_verification_paths_are_classified_without_reading_content(path):
+	page = make_page(f'https://github.com{path}')
+	page.evaluate = AsyncMock()
+
+	assert await browser._inspect_github_auth_state(page) == 'verification-required'
+	page.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('state', ['login-form', 'login-error', 'verification-required', 'unknown'])
+async def test_github_auth_state_uses_only_fixed_state_labels(state):
+	page = make_page('https://github.com/login')
+	page.evaluate = AsyncMock(return_value=state)
+
+	assert await browser._inspect_github_auth_state(page) == state
+
+
+@pytest.mark.asyncio
+async def test_github_diagnostics_capture_oauth_popup_and_exclude_sensitive_url_values(monkeypatch, capsys):
+	page = make_page('https://agentrouter.org/login')
+	existing = make_page('https://github.com/settings/profile')
+	popup = make_page('https://github.com/login?client_id=private-client&state=private-state#private-fragment')
+	closed = make_page('https://github.com/login')
+	closed.is_closed.return_value = True
+	page.context = SimpleNamespace(pages=[page, existing, popup, closed])
+	monkeypatch.setattr(browser, '_inspect_github_auth_state', AsyncMock(return_value='unknown'))
+	screenshot = AsyncMock()
+	monkeypatch.setattr(browser, 'save_login_screenshot', screenshot)
+
+	await browser._save_github_oauth_diagnostics(
+		page,
+		{page, existing},
+		'agentrouter',
+		'Test',
+		github_seen=True,
+		credentials_submitted=False,
+		authorization_submitted=False,
+	)
+
+	assert [call.args[0] for call in screenshot.await_args_list] == [page, popup]
+	output = capsys.readouterr().out
+	assert 'https://github.com/login' in output
+	assert 'github_seen=True' in output
+	assert 'private-client' not in output
+	assert 'private-state' not in output
+	assert 'private-fragment' not in output
 
 
 @pytest.mark.asyncio

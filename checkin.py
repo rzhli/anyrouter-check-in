@@ -44,6 +44,7 @@ from utils.browser import (
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import debug_print, is_debug_enabled
+from utils.github_session import GitHubSessionError, load_github_session, mask_github_cookie_values
 from utils.notify import notify
 from utils.proxy import get_playwright_proxy, get_proxy_server
 
@@ -160,6 +161,13 @@ async def login_with_credentials(
 	"""通过邮箱密码或 GitHub OAuth 登录，返回 cookies 与用户标识。"""
 	method_label = 'GitHub OAuth' if auth_method == 'github' else 'email/password'
 	print(f'[PROCESSING] {account_name}: Logging in with {method_label}...')
+	github_cookies = None
+	if auth_method == 'github':
+		try:
+			github_cookies = load_github_session(account_name)
+		except GitHubSessionError as error:
+			print(f'[FAILED] {account_name}: {error}')
+			return None
 
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
 	settings = load_browser_login_settings(
@@ -188,6 +196,15 @@ async def login_with_credentials(
 
 	page = None
 	try:
+		if github_cookies:
+			mask_github_cookie_values(github_cookies)
+			try:
+				await context.add_cookies(github_cookies)
+			except Exception:
+				raise GitHubSessionError(
+					'Cannot import GitHub session; export and update GITHUB_SESSION_STATE again'
+				) from None
+			print(f'[INFO] {account_name}: Imported GitHub session from Secret; no password or 2FA seed is needed')
 		page = await context.new_page()
 		await prepare_browser_page(page)
 		if auth_method == 'github':

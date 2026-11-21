@@ -15,8 +15,17 @@ def test_browser_login_settings_records_profile_persistence(monkeypatch, tmp_pat
 	assert settings.profile_dir == tmp_path / 'agentrouter' / 'Account 1'
 
 
+def test_actions_never_persists_sensitive_browser_profiles(monkeypatch):
+	monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+
+	settings = load_browser_login_settings('AgentRouter', 'agentrouter', persist_profile=True)
+
+	assert settings.persist_profile is False
+
+
 @pytest.mark.asyncio
 async def test_launch_login_context_uses_persistent_context_when_enabled(monkeypatch, tmp_path):
+	monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
 	calls = {}
 	context = SimpleNamespace()
 
