@@ -109,7 +109,7 @@ GitHub Actions 的运行环境不会自动获得本地 profile。启用 2FA 时�
 
 #### 保留 2FA：本地认证后导入 Actions
 
-1. 在本地桌面环境安装项目依赖和 CloakBrowser，安装 GitHub CLI（`gh`），通过 `gh auth login` 登录有权管理该仓库 Secrets 的账号。GitHub CLI 的认证用于上传 Secret，和浏览器中登录 AgentRouter 的 GitHub 账号是两件事。
+1. 在本地桌面环境安装项目依赖，选择 CloakBrowser 或本机 Firefox，安装 GitHub CLI（`gh`），通过 `gh auth login` 登录有权管理该仓库 Secrets 的账号。GitHub CLI 的认证用于上传 Secret，和浏览器中登录 AgentRouter 的 GitHub 账号是两件事。
 2. 确认仓库已有 `production` Environment，`ANYROUTER_ACCOUNTS` 中 AgentRouter 的 `name` 是 `AgentRouter`。若使用其他名称，修改下方的 `--account-name`。
 3. 在项目目录运行：
 
@@ -119,10 +119,18 @@ uv run python -m cloakbrowser install
 uv run python scripts/github_session.py --account-name AgentRouter --repo rzhli/anyrouter-check-in
 ```
 
+**本机已有 Firefox 时，可以改用以下命令，不需要下载 CloakBrowser 的浏览器二进制：**
+
+```bash
+uv run --extra firefox python scripts/github_session.py --browser firefox --account-name AgentRouter --repo rzhli/anyrouter-check-in
+```
+
+`firefox` 是可选依赖，仅为本地导出工具安装 Selenium。Firefox 必须在 `PATH` 中；Selenium Manager 首次运行会下载较小的 `geckodriver`，若该下载也受网络限制，请自行安装 `geckodriver` 并加入 `PATH`。工具启动独立临时 Firefox profile，不读取或修改你日常 Firefox 的已登录会话，因此仍需在新窗口完成一次登录和 2FA，结束后关闭临时浏览器。Actions 的签到浏览器仍使用 CloakBrowser，不受此选项影响。
+
 4. 在新打开的本地浏览器中，用绑定 AgentRouter 的 GitHub 账号完成用户名、密码、六位验证码和必要的设备验证。完成后回到终端按 Enter。工具会访问 GitHub 的个人设置页确认已登录，只导出 `github.com` Cookie，并通过 `gh` 的标准 Secret 加密上传流程更新 `production` 的 `GITHUB_SESSION_STATE`。密码、验证码、2FA 密钥和浏览器 profile 均不导出；导出的 JSON 通过标准输入提交，不生成会话文件，也不出现在命令参数或终端输出中。
 5. 重新运行 Actions。脚本按账号名称导入会话，退出时仅清理 AgentRouter 登录态，保留 GitHub Cookie；因此通常可直接完成 OAuth，无需在 Actions 中输入六位验证码。`ANYROUTER_ACCOUNTS` 中可以省略 `github_username` 和 `github_password`。
 
-本地工具默认直连；需要代理时先设置 `CHECKIN_PROXY_URL`，再添加 `--use-proxy`。`--environment` 可覆盖默认的 `production`。多个 AgentRouter 账号可重复传入 `--account-name`，每个账号都会打开独立浏览器供你登录；一次上传替换整个 Secret，因此应同时导出所有需要的账号。
+本地工具默认直连；需要代理时先设置 `CHECKIN_PROXY_URL`，再添加 `--use-proxy`。Firefox 支持明确指定端口、不包含用户名密码的 HTTP 或 SOCKS5 代理，例如 `http://127.0.0.1:7890`；代理选项不控制 Selenium Manager 的驱动下载。`--environment` 可覆盖默认的 `production`。多个 AgentRouter 账号可重复传入 `--account-name`，每个账号都会打开独立浏览器供你登录；一次上传替换整个 Secret，因此应同时导出所有需要的账号。
 
 若不能直接上传，可使用 `--output .session_exports/github-session.json` 代替 `--repo`，再将文件全部内容粘贴到 `production` 的 `GITHUB_SESSION_STATE` Secret。文件权限为 `0600`，目录已加入 `.gitignore`，已存在的文件不会被覆盖。它是明文登录凭证，导入后请删除，不要发送到聊天、提交到仓库或上传为 artifact。
 

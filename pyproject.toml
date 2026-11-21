@@ -9,6 +9,9 @@ dependencies = [
   "python-dotenv>=1.0.0"
 ]
 
+[project.optional-dependencies]
+firefox = ["selenium>=4.27.0"]
+
 [dependency-groups]
 dev = [
   "pytest>=7.4.0",
