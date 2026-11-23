@@ -26,9 +26,12 @@ class ProviderConfig:
 	# 签到流程类型：
 	# 'legacy'    - 老版 new-api / one-api：浏览器登录拿 session cookie + new-api-user 头
 	# 'newapi_v2' - 新版 new-api（v1.0.0-rc 起）：Authorization: Bearer 访问令牌 + Turnstile
-	flow: Literal['legacy', 'newapi_v2'] = 'legacy'
-	# newapi_v2 专用：签到状态查询接口（GET，返回 checked_in_today）
+	# 'sub2api'   - Sub2API：登录 JWT + /api/v1/user/checkin
+	flow: Literal['legacy', 'newapi_v2', 'sub2api'] = 'legacy'
+	# 签到状态查询接口（GET，NewAPI 返回 checked_in_today，Sub2API 返回 checked_in）
 	checkin_status_path: str | None = None
+	# Sub2API 累计实际消耗查询接口（金额直接以美元返回）
+	usage_info_path: str | None = None
 	# 额度换算单位：quota / quota_per_unit = 美元金额
 	quota_per_unit: int = 500000
 	# 浏览器点击签到：newapi_v2 站点若被 Cloudflare 拦截（httpx 无法直接访问 API），
@@ -84,6 +87,7 @@ class ProviderConfig:
 			persist_profile=data.get('persist_profile', default_persist_profile),
 			flow=data.get('flow', defaults.flow if defaults else 'legacy'),
 			checkin_status_path=data.get('checkin_status_path', defaults.checkin_status_path if defaults else None),
+			usage_info_path=data.get('usage_info_path', defaults.usage_info_path if defaults else None),
 			quota_per_unit=data.get('quota_per_unit', defaults.quota_per_unit if defaults else 500000),
 			browser_click_check_in=data.get(
 				'browser_click_check_in', defaults.browser_click_check_in if defaults else False
@@ -107,7 +111,7 @@ class ProviderConfig:
 
 	def uses_access_token(self) -> bool:
 		"""判断是否使用访问令牌（Bearer）鉴权，而非 session cookie"""
-		return self.flow == 'newapi_v2'
+		return self.flow in {'newapi_v2', 'sub2api'}
 
 	def needs_browser_click_check_in(self) -> bool:
 		"""判断是否需要浏览器点击签到（用于被 Cloudflare 拦截的 newapi_v2 站点）"""
@@ -148,6 +152,20 @@ class AppConfig:
 				use_proxy=True,
 				persist_profile=True,
 				github_oauth=True,
+			),
+			# auth_token 是 localStorage 键名，不是凭据。
+			'tokenfuture': ProviderConfig(  # nosec B106
+				name='tokenfuture',
+				domain='https://tokenfuture.si',
+				flow='sub2api',
+				sign_in_path='/api/v1/user/checkin',
+				checkin_status_path='/api/v1/user/checkin',
+				user_info_path='/api/v1/auth/me',
+				usage_info_path='/api/v1/usage/dashboard/stats',
+				checkin_page_path='/custom/public-benefits',
+				token_storage_key='auth_token',
+				quota_per_unit=1,
+				persist_profile=True,
 			),
 		}
 		supported_providers = frozenset(providers)
@@ -267,7 +285,7 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				return None
 
 			provider = account_dict.get('provider', 'anyrouter')
-			if provider not in {'anyrouter', 'agentrouter'}:
+			if provider not in {'anyrouter', 'agentrouter', 'tokenfuture'}:
 				print(f'[WARNING] Account {i + 1}: Provider "{provider}" is not supported and will be ignored')
 				continue
 
@@ -285,6 +303,9 @@ def load_accounts_config() -> list[AccountConfig] | None:
 					f'ERROR: Account {i + 1}: AgentRouter requires cookies, GitHub credentials, or access_token '
 					'with a saved GitHub browser session'
 				)
+				return None
+			if provider == 'tokenfuture' and not has_access_token and not has_login:
+				print(f'ERROR: Account {i + 1}: TokenFuture requires access_token or email+password')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:

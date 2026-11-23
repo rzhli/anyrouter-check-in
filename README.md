@@ -7,7 +7,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
 
-多账号自动签到，目前只保留 Any Router 和 Agent Router 两个平台。
+多账号自动签到，支持 Any Router、Agent Router 和 TokenFuture 三个平台。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
@@ -34,6 +34,7 @@
 
 1. **Cookies**: 用于 AnyRouter 身份验证
 2. **AgentRouter 系统访问令牌**：用于读取余额；签到时还会重新执行 GitHub OAuth
+3. **TokenFuture 邮箱密码或登录访问令牌**：用于公益福利页面的每日签到，详见下方 TokenFuture 配置
 
 #### 获取 Cookies：
 
@@ -73,6 +74,12 @@
     "name": "备用账号",
     "provider": "agentrouter",
     "access_token": "AgentRouter 系统访问令牌"
+  },
+  {
+    "name": "TokenFuture",
+    "provider": "tokenfuture",
+    "email": "你的注册邮箱",
+    "password": "你的登录密码"
   }
 ]
 ```
@@ -80,8 +87,8 @@
 **字段说明**：
 
 - `cookies`：AnyRouter 的 Cookie 字典或 Cookie 字符串；AnyRouter 不需要 `api_user`
-- `email` + `password`：AnyRouter 也可通过邮箱或用户名登录，自动获取 Cookie
-- `access_token`：AgentRouter 的系统访问令牌，放在 GitHub Secret 中
+- `email` + `password`：AnyRouter 可通过邮箱或用户名登录；TokenFuture 使用注册邮箱登录
+- `access_token`：AgentRouter 的系统访问令牌或 TokenFuture 的登录 JWT，放在 GitHub Secret 中
 - `GH_SESSION_STATE`：独立的可选 Environment Secret；由本地工具导出已完成 2FA 的 GitHub 会话，按账号 `name` 匹配
 - `github_username` + `github_password`：可选；没有时复用持久化浏览器 profile 中的 GitHub 登录态
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
@@ -91,7 +98,7 @@
 
 - 如果未提供 `provider` 字段，默认使用 `anyrouter`（向后兼容）
 - 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称
-- 仅 `anyrouter` 和 `agentrouter` 有内置配置；其它 provider 会被忽略
+- `anyrouter`、`agentrouter` 和 `tokenfuture` 有内置配置；其它 provider 会被忽略
 
 ### 4.1 AgentRouter 登录签到
 
@@ -150,6 +157,25 @@ AnyRouter 账号不需要 `user_id` 或 `api_user`。Cookie 中填写 `acw_sc__v
 
 ![获取 cookies](./assets/request-session.png)
 
+### 4.3 TokenFuture 公益福利签到
+
+签到页面：https://tokenfuture.si/custom/public-benefits 。在 `ANYROUTER_ACCOUNTS` 数组中追加：
+
+```json
+{
+  "name": "TokenFuture",
+  "provider": "tokenfuture",
+  "email": "你的注册邮箱",
+  "password": "你的登录密码"
+}
+```
+
+邮箱密码方式每次通过浏览器登录，等待站点的 Turnstile 验证完成后自动获取新的登录令牌。也可以用 `"access_token": "你的登录 JWT"` 替代 `email` 和 `password`：登录网站后，在浏览器开发者工具 → Application / 存储 → Local Storage → `https://tokenfuture.si` 中复制 `auth_token` 的值。该令牌是网页登录凭证，**不是用于模型调用的 `sk-...` API Key**；令牌过期后需要重新获取。两种方式同时配置时优先邮箱密码；Cookie 和 GitHub 登录不适用于 TokenFuture。
+
+TokenFuture 使用 Sub2API：先通过 `/api/v1/auth/me` 读取余额，再查询 `/api/v1/user/checkin` 的 `enabled` / `checked_in` 状态；未签到时向同一接口 POST 空 JSON。已经签到会直接成功跳过，活动尚未开放、登录失效或返回格式异常会明确报告失败。余额和 `/api/v1/usage/dashboard/stats` 的累计实际消耗直接以美元返回，不按 NewAPI 的 quota 单位换算。
+
+邮箱登录时若验证超时，可在本地设置 `CHECKIN_HEADLESS=false` 完成验证；GitHub Actions 中的无人值守验证能否完成取决于站点。启用登录二次验证时请使用已完成验证的 `auth_token`。账号配置仍放在 `production` 的 `ANYROUTER_ACCOUNTS` Secret 中，无需新增 workflow 或 `PROVIDERS` 配置。
+
 
 ### 5. 启用 GitHub Actions
 
@@ -175,7 +201,7 @@ AnyRouter 账号不需要 `user_id` 或 `api_user`。Cookie 中填写 `acw_sc__v
 
 ## 注意事项
 
-- 请确保 AnyRouter 的四项 Cookie 有效；AgentRouter 的系统访问令牌和 GitHub 登录态有效
+- 请确保 AnyRouter 的四项 Cookie、AgentRouter 的系统访问令牌和 GitHub 登录态、TokenFuture 的登录凭据有效
 - 可以在 Actions 页面查看详细的运行日志
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
@@ -202,7 +228,7 @@ AnyRouter 不需要 `api_user`，直接填写四项 Cookie：
 
 ### 多服务商配置
 
-如果你需要同时使用多个服务商（如 anyrouter 和 agentrouter）：
+如果你需要同时使用多个服务商：
 
 ```json
 [
@@ -220,13 +246,18 @@ AnyRouter 不需要 `api_user`，直接填写四项 Cookie：
     "name": "AgentRouter 备用",
     "provider": "agentrouter",
     "access_token": "AgentRouter 系统访问令牌"
+  },
+  {
+    "name": "TokenFuture",
+    "provider": "tokenfuture",
+    "access_token": "TokenFuture Local Storage 中的 auth_token"
   }
 ]
 ```
 
 ## Provider 配置
 
-脚本只接受内置的 `anyrouter` 和 `agentrouter`。`PROVIDERS` 只用于覆盖这两个 provider 的设置，其他站点会被忽略。
+脚本接受内置的 `anyrouter`、`agentrouter` 和 `tokenfuture`。`PROVIDERS` 用于覆盖这些 provider 的设置，其他站点会被忽略。
 
 可按需覆盖域名、代理和 GitHub OAuth 开关等设置：
 
@@ -273,7 +304,7 @@ AnyRouter 不需要 `api_user`，直接填写四项 Cookie：
 
 **重要提示**：
 
-- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`agentrouter`
+- `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter`、`agentrouter`、`tokenfuture`
 - 自定义的 provider 配置会覆盖同名的默认配置
 
 ## 代理配置（可选）

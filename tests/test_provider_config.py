@@ -10,7 +10,7 @@ def test_builtin_provider_profile_persistence_defaults(monkeypatch):
 
 	config = AppConfig.load_from_env()
 
-	assert set(config.providers) == {'anyrouter', 'agentrouter'}
+	assert set(config.providers) == {'anyrouter', 'agentrouter', 'tokenfuture'}
 	assert config.providers['anyrouter'].persist_profile is True
 	assert config.providers['agentrouter'].persist_profile is True
 	assert config.providers['agentrouter'].github_oauth is True
@@ -39,7 +39,7 @@ def test_unsupported_provider_is_ignored(monkeypatch):
 
 	config = AppConfig.load_from_env()
 
-	assert set(config.providers) == {'anyrouter', 'agentrouter'}
+	assert set(config.providers) == {'anyrouter', 'agentrouter', 'tokenfuture'}
 
 
 def test_builtin_provider_override_does_not_require_domain(monkeypatch):
@@ -121,7 +121,7 @@ def test_github_credentials_are_parsed(monkeypatch):
 	assert AccountConfig(cookies=None).has_github_credentials() is False
 
 
-@pytest.mark.parametrize('provider', ['anyrouter', 'agentrouter'])
+@pytest.mark.parametrize('provider', ['anyrouter', 'agentrouter', 'tokenfuture'])
 def test_whitespace_token_without_credentials_is_rejected(monkeypatch, provider):
 	monkeypatch.setenv('ANYROUTER_ACCOUNTS', json.dumps([{'provider': provider, 'access_token': '  '}]))
 

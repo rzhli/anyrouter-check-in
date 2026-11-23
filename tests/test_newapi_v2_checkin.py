@@ -87,9 +87,9 @@ def test_builtin_newapi_v2_providers(monkeypatch):
 	monkeypatch.delenv('PROVIDERS', raising=False)
 	config = AppConfig.load_from_env()
 
-	assert set(config.providers) == {'anyrouter', 'agentrouter'}
-	assert all(provider.flow == 'legacy' for provider in config.providers.values())
-	assert all(provider.uses_access_token() is False for provider in config.providers.values())
+	assert set(config.providers) == {'anyrouter', 'agentrouter', 'tokenfuture'}
+	assert config.providers['tokenfuture'].flow == 'sub2api'
+	assert all(provider.flow != 'newapi_v2' for provider in config.providers.values())
 
 
 def test_legacy_providers_keep_session_flow(monkeypatch):

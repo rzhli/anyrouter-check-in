@@ -47,6 +47,7 @@ from utils.debug import debug_print, is_debug_enabled
 from utils.github_session import GitHubSessionError, load_github_session, mask_github_cookie_values
 from utils.notify import notify
 from utils.proxy import get_playwright_proxy, get_proxy_server
+from utils.sub2api import check_in_account_sub2api
 
 load_dotenv()
 
@@ -802,6 +803,9 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return False, None, None
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
+
+	if provider_config.flow == 'sub2api':
+		return await check_in_account_sub2api(account, account_name, provider_config)
 
 	if provider_config.uses_access_token():
 		return await check_in_account_v2(account, account_name, provider_config)
