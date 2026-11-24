@@ -573,6 +573,11 @@ _READ_TURNSTILE_TOKEN_JS = f"""() => {{
 	for (const input of inputs) {{
 		if (input.value) return input.value;
 	}}
+	// 部分组件只通过回调保存 token，使用 Turnstile 官方 API 读取真实验证结果。
+	try {{
+		const token = window.turnstile?.getResponse?.();
+		if (typeof token === 'string' && token) return token;
+	}} catch (e) {{}}
 	return null;
 }}"""
 

@@ -391,7 +391,12 @@ def test_system_token_is_only_used_for_agentrouter_and_api_user_is_optional(monk
 	cookies = {'session': 'site'}
 	account = AccountConfig(cookies=cookies, provider=provider_name, access_token=' system-token ')
 	monkeypatch.setattr(checkin.httpx, 'Client', MagicMock())
-	user_info = Mock(return_value={'success': True, 'quota': 10, 'display': 'Balance: 10'})
+	user_info = Mock(
+		side_effect=[
+			{'success': True, 'quota': 10, 'used_quota': 0, 'display': 'Balance: 10'},
+			{'success': True, 'quota': 35, 'used_quota': 0, 'display': 'Balance: 35'},
+		],
+	)
 	monkeypatch.setattr(checkin, 'get_user_info', user_info)
 	monkeypatch.setattr(checkin, 'execute_check_in', Mock(return_value=True))
 

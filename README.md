@@ -151,7 +151,22 @@ Secret 名称必须是 `GH_SESSION_STATE`，不要以 GitHub 保留的 `GITHUB_`
 
 ### 4.2 AnyRouter Cookie
 
-AnyRouter 账号不需要 `user_id` 或 `api_user`。Cookie 中填写 `acw_sc__v2`、`acw_tc`、`cdn_sec_tc` 和 `session` 四项即可。
+AnyRouter 可用 `acw_sc__v2`、`acw_tc`、`cdn_sec_tc` 和 `session` 四项 Cookie 登录。脚本会先验证 `/api/user/self`；若返回 401 / 403，会停止并报告失败，不再把后续 HTTP 200 当作成功。
+
+推荐使用邮箱或用户名密码自动获取新的 Cookie 和用户标识：
+
+```json
+{
+  "name": "AnyRouter",
+  "provider": "anyrouter",
+  "email": "你的邮箱或用户名",
+  "password": "你的登录密码"
+}
+```
+
+Cookie 模式下，401 / 403 可能来自失效的 `session` 或缺失的 `new-api-user` 请求头。可重新复制手动登录成功后的 Cookie；若站点要求用户标识，也可在账号对象中填写 `"api_user": "你的用户 ID"`。邮箱密码模式会从验证成功的用户信息中自动获取该 ID，无需手动填写。
+
+独立签到接口仍为 `/api/user/sign_in`。返回 JSON 中的 `success: false` 不会被 `code: 0` 覆盖；签到后会重新读取余额，以余额与累计消耗之和的增量核对奖励。明确返回“今日已签到”时可成功跳过；接受请求但未到账、余额无法验证时会报告失败。
 
 每次运行会重新获取 WAF Cookie，以浏览器获取的新值覆盖配置中的同名旧值，同时保留账号的 `session`。HTTP 200 不代表签到成功；如果响应是 HTML 验证页或登录重定向而不是 JSON，脚本会报告响应类型，需检查站点验证、代理出口及 Cookie 有效性。
 
@@ -174,7 +189,17 @@ AnyRouter 账号不需要 `user_id` 或 `api_user`。Cookie 中填写 `acw_sc__v
 
 TokenFuture 使用 Sub2API：先通过 `/api/v1/auth/me` 读取余额，再查询 `/api/v1/user/checkin` 的 `enabled` / `checked_in` 状态；未签到时向同一接口 POST 空 JSON。已经签到会直接成功跳过，活动尚未开放、登录失效或返回格式异常会明确报告失败。余额和 `/api/v1/usage/dashboard/stats` 的累计实际消耗直接以美元返回，不按 NewAPI 的 quota 单位换算。
 
-邮箱登录时若验证超时，可在本地设置 `CHECKIN_HEADLESS=false` 完成验证；GitHub Actions 中的无人值守验证能否完成取决于站点。启用登录二次验证时请使用已完成验证的 `auth_token`。账号配置仍放在 `production` 的 `ANYROUTER_ACCOUNTS` Secret 中，无需新增 workflow 或 `PROVIDERS` 配置。
+邮箱登录时若验证超时，可在本地设置 `CHECKIN_HEADLESS=false` 完成验证；GitHub Actions 中的无人值守验证能否完成取决于站点。脚本会同时从隐藏输入框和 Turnstile 官方 `getResponse()` 接口读取真实验证结果，调试模式下会保存超时截图。启用登录二次验证时请使用已完成验证的 `auth_token`。账号配置仍放在 `production` 的 `ANYROUTER_ACCOUNTS` Secret 中。
+
+TokenFuture 默认直连，即使配置了 `CHECKIN_PROXY_URL`，也需要在 `PROVIDERS` 中启用该站点的代理设置才会使用它。Actions 出口无法完成验证时，已有代理可配置为：
+
+```json
+{
+  "tokenfuture": {
+    "use_proxy": true
+  }
+}
+```
 
 
 ### 5. 启用 GitHub Actions

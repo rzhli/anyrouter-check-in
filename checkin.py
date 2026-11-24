@@ -6,6 +6,7 @@ AnyRouter.top 自动签到脚本
 import asyncio
 import hashlib
 import json
+import math
 import os
 import sys
 from datetime import datetime
@@ -283,8 +284,15 @@ def parse_user_info_payload(payload, quota_per_unit: int = 500000) -> dict:
 	"""解析 /api/user/self 的 JSON payload 为统一的信息字典。"""
 	if not isinstance(payload, dict):
 		return {'success': False, 'error': 'Invalid response'}
-	if payload.get('success'):
-		user_data = payload.get('data', {}) or {}
+	if payload.get('success') is True:
+		user_data = payload.get('data')
+		if not isinstance(user_data, dict) or any(
+			isinstance(user_data.get(key), bool)
+			or not isinstance(user_data.get(key), (int, float))
+			or not math.isfinite(user_data[key])
+			for key in ('quota', 'used_quota')
+		):
+			return {'success': False, 'error': 'Missing or invalid balance data'}
 		unit = quota_per_unit or 500000
 		quota = round(user_data.get('quota', 0) / unit, 2)
 		used_quota = round(user_data.get('used_quota', 0) / unit, 2)
@@ -322,7 +330,11 @@ def get_user_info(client, headers, user_info_url: str, quota_per_unit: int = 500
 			except json.JSONDecodeError:
 				return {'success': False, 'error': describe_invalid_json_response(response)}
 			return parse_user_info_payload(payload, quota_per_unit)
-		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
+		return {
+			'success': False,
+			'status_code': response.status_code,
+			'error': f'Failed to get user info: HTTP {response.status_code}',
+		}
 	except Exception as e:
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
 
@@ -366,8 +378,10 @@ def is_already_checked_in(message: str) -> bool:
 	return any(keyword.lower() in lowered for keyword in ALREADY_CHECKED_KEYWORDS)
 
 
-def execute_check_in(client, account_name: str, provider_config, headers: dict):
-	"""执行签到请求"""
+def execute_check_in(
+	client, account_name: str, provider_config, headers: dict, *, response_details: dict | None = None
+):
+	"""执行签到请求；API 接受请求后，调用方仍需验证余额。"""
 	print(f'[NETWORK] {account_name}: Executing check-in')
 
 	checkin_headers = headers.copy()
@@ -381,19 +395,31 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 	if response.status_code == 200:
 		try:
 			result = response.json()
-			if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
-				print(f'[SUCCESS] {account_name}: Check-in successful!')
+			if not isinstance(result, dict):
+				print(f'[FAILED] {account_name}: Check-in failed - Invalid JSON response')
+				return False
+			error_msg = result.get('msg') or result.get('message') or 'Unknown error'
+			if isinstance(error_msg, str) and is_already_checked_in(error_msg):
+				if response_details is not None:
+					response_details['already_checked_in'] = True
+				print(f'[INFO] {account_name}: API reports already checked in; verifying balance access')
+				return True
+			# 优先采用站点的主要结果字段，禁止 code=0 覆盖 success=false / ret=0。
+			if 'success' in result:
+				accepted = result['success'] is True
+			elif 'ret' in result:
+				accepted = type(result['ret']) is int and result['ret'] == 1
+			else:
+				accepted = type(result.get('code')) is int and result['code'] == 0
+			if accepted:
+				print(f'[INFO] {account_name}: Check-in API accepted request; verifying reward')
 				return True
 			else:
-				error_msg = result.get('msg', result.get('message', 'Unknown error'))
-				if is_already_checked_in(error_msg):
-					print(f'[SUCCESS] {account_name}: Already checked in today')
-					return True
 				print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
 				return False
 		except json.JSONDecodeError:
 			if response.text.strip().lower() == 'success':
-				print(f'[SUCCESS] {account_name}: Check-in successful!')
+				print(f'[INFO] {account_name}: Check-in API accepted request; verifying reward')
 				return True
 			else:
 				print(f'[FAILED] {account_name}: Check-in failed - {describe_invalid_json_response(response)}')
@@ -924,13 +950,46 @@ def run_check_in_requests(
 			user_info_before = get_user_info(client, headers, user_info_url, provider_config.quota_per_unit)
 			if user_info_before and user_info_before.get('success'):
 				print(user_info_before['display'])
-			elif user_info_before:
-				print(user_info_before.get('error', 'Unknown error'))
+			else:
+				error = user_info_before.get('error', 'Unknown error') if user_info_before else 'Unknown error'
+				if user_info_before and user_info_before.get('status_code') in (401, 403):
+					if provider_config.github_oauth:
+						error += '; refresh the system access token and GitHub session in GH_SESSION_STATE'
+					else:
+						error += (
+							'; refresh the session Cookie or configure email+password for a fresh browser login; '
+							'if the site requires new-api-user, set api_user to the logged-in user ID'
+						)
+				failure = {'success': False, 'error': error}
+				print(f'[FAILED] {account_name}: Login/balance verification failed - {error}; check-in not attempted')
+				return False, user_info_before, failure
 
 			if provider_config.needs_manual_check_in():
-				success = execute_check_in(client, account_name, provider_config, headers)
+				response_details: dict = {}
+				success = execute_check_in(
+					client, account_name, provider_config, headers, response_details=response_details
+				)
 				user_info_after = get_user_info(client, headers, user_info_url, provider_config.quota_per_unit)
-				return success, user_info_before, user_info_after
+				if not success:
+					return False, user_info_before, user_info_after
+				if not user_info_after or not user_info_after.get('success'):
+					print(f'[FAILED] {account_name}: Check-in API accepted request, but balance could not be verified')
+					return False, user_info_before, user_info_after
+				reward = round(
+					user_info_after['quota']
+					+ user_info_after['used_quota']
+					- user_info_before['quota']
+					- user_info_before['used_quota'],
+					2,
+				)
+				if response_details.get('already_checked_in'):
+					print(f'[SUCCESS] {account_name}: Already checked in; balance access verified')
+				elif reward > 0:
+					print(f'[SUCCESS] {account_name}: Check-in reward verified: +${reward:.2f}')
+				else:
+					print(f'[FAILED] {account_name}: Check-in API accepted request, but no reward was credited')
+					return False, user_info_before, user_info_after
+				return True, user_info_before, user_info_after
 
 			user_info_after = get_user_info(client, headers, user_info_url, provider_config.quota_per_unit)
 			if user_info_after and user_info_after.get('success'):

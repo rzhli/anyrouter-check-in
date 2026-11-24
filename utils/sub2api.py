@@ -12,6 +12,7 @@ from utils.browser import (
 	load_browser_login_settings,
 	navigate_and_wait,
 	prepare_browser_page,
+	save_login_screenshot,
 	wait_for_turnstile_token,
 )
 from utils.config import AccountConfig, ProviderConfig
@@ -102,7 +103,15 @@ async def login_sub2api_with_browser(
 		await fill_email_credentials(page, account.email or '', account.password or '', settings.wait_timeout_ms)
 		turnstile_enabled = await page.evaluate('() => window.__APP_CONFIG__?.turnstile_enabled === true')
 		if turnstile_enabled and not await wait_for_turnstile_token(page, settings.wait_timeout_ms):
-			raise Sub2APIError('Login verification did not complete')
+			await save_login_screenshot(page, provider.name, account_name, 'turnstile-timeout')
+			proxy_hint = (
+				'check the configured proxy exit'
+				if provider.use_proxy
+				else 'enable tokenfuture.use_proxy in PROVIDERS to use CHECKIN_PROXY_URL'
+			)
+			raise Sub2APIError(
+				f'Login verification did not complete; in Actions, {proxy_hint}, or configure a valid login access_token'
+			)
 		async with page.expect_response(
 			lambda response: urlsplit(response.url).path == '/api/v1/auth/login' and response.request.method == 'POST',
 			timeout=settings.wait_timeout_ms,
